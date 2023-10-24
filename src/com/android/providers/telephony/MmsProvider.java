@@ -57,7 +57,6 @@ import android.util.EventLog;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.telephony.TelephonyPermissions;
 import com.android.internal.telephony.util.TelephonyUtils;
 
 import com.google.android.mms.MmsException;
@@ -642,7 +641,7 @@ public class MmsProvider extends ContentProvider {
         }
 
         if (table.equals(TABLE_PDU)) {
-            if (!TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(), subId,
+            if (!ProviderUtil.allowInteractingWithEntryOfSubscription(getContext(), subId,
                     callerUserHandle)) {
                 TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(), subId,
                         callerUid, callerPkg);
