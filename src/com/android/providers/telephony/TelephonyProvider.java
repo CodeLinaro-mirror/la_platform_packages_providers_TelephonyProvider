@@ -33,6 +33,7 @@ import static android.provider.Telephony.Carriers.CURRENT;
 import static android.provider.Telephony.Carriers.DEFAULT_SORT_ORDER;
 import static android.provider.Telephony.Carriers.EDITED_STATUS;
 import static android.provider.Telephony.Carriers.INFRASTRUCTURE_BITMASK;
+import static android.provider.Telephony.Carriers.ESIM_BOOTSTRAP_PROVISIONING;
 import static android.provider.Telephony.Carriers.LINGERING_NETWORK_TYPE_BITMASK;
 import static android.provider.Telephony.Carriers.MAX_CONNECTIONS;
 import static android.provider.Telephony.Carriers.MCC;
@@ -163,7 +164,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 65 << 16;
+    private static final int DATABASE_VERSION = 67 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -399,7 +400,9 @@ public class TelephonyProvider extends ContentProvider
         CARRIERS_UNIQUE_FIELDS_DEFAULTS.put(CARRIER_ID,
                 String.valueOf(TelephonyManager.UNKNOWN_CARRIER_ID));
         CARRIERS_UNIQUE_FIELDS_DEFAULTS.put(INFRASTRUCTURE_BITMASK,
-                String.valueOf(ApnSetting.INFRASTRUCTURE_CELLULAR));
+                String.valueOf(
+                        ApnSetting.INFRASTRUCTURE_CELLULAR | ApnSetting.INFRASTRUCTURE_SATELLITE));
+        CARRIERS_UNIQUE_FIELDS_DEFAULTS.put(ESIM_BOOTSTRAP_PROVISIONING, "0");
 
         CARRIERS_UNIQUE_FIELDS.addAll(CARRIERS_UNIQUE_FIELDS_DEFAULTS.keySet());
 
@@ -410,6 +413,7 @@ public class TelephonyProvider extends ContentProvider
         CARRIERS_BOOLEAN_FIELDS.add(MODEM_PERSIST);
         CARRIERS_BOOLEAN_FIELDS.add(USER_VISIBLE);
         CARRIERS_BOOLEAN_FIELDS.add(USER_EDITABLE);
+        CARRIERS_BOOLEAN_FIELDS.add(ESIM_BOOTSTRAP_PROVISIONING);
 
         MVNO_TYPE_STRING_MAP = new ArrayMap<>();
         MVNO_TYPE_STRING_MAP.put("spn", ApnSetting.MVNO_TYPE_SPN);
@@ -509,7 +513,8 @@ public class TelephonyProvider extends ContentProvider
                 APN_SET_ID + " INTEGER DEFAULT " + NO_APN_SET_ID + "," +
                 SKIP_464XLAT + " INTEGER DEFAULT " + SKIP_464XLAT_DEFAULT + "," +
                 ALWAYS_ON + " INTEGER DEFAULT 0," +
-                INFRASTRUCTURE_BITMASK + " INTEGER DEFAULT 1," +
+                INFRASTRUCTURE_BITMASK + " INTEGER DEFAULT 3," +
+                ESIM_BOOTSTRAP_PROVISIONING + " BOOLEAN DEFAULT 0," +
                 // Uniqueness collisions are used to trigger merge code so if a field is listed
                 // here it means we will accept both (user edited + new apn_conf definition)
                 // Columns not included in UNIQUE constraint: name, current, edited,
@@ -1980,6 +1985,36 @@ public class TelephonyProvider extends ContentProvider
                 oldVersion = 65 << 16 | 6;
             }
 
+            if (oldVersion < (66 << 16 | 6)) {
+                try {
+                    // Try to add new field ESIM_BOOTSTRAP_PROVISIONING
+                    db.execSQL("ALTER TABLE " + CARRIERS_TABLE + " ADD COLUMN "
+                            + ESIM_BOOTSTRAP_PROVISIONING + " INTEGER DEFAULT 0;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade failed to update " + CARRIERS_TABLE
+                                    + " to add esim bootstrap provisioning flag");
+                    }
+
+                }
+                oldVersion = 66 << 16 | 6;
+            }
+
+            if (oldVersion < (67 << 16 | 6)) {
+                try {
+                    // If default value of infrastructure_bitmask column is set to 1, then update
+                    // it to 3
+                    db.execSQL("UPDATE " + CARRIERS_TABLE + " SET " + INFRASTRUCTURE_BITMASK + "=3"
+                            + "  WHERE " + INFRASTRUCTURE_BITMASK + "=1;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade failed to update " + CARRIERS_TABLE
+                                + " to add infrastructure bitmask value.");
+                    }
+                }
+                oldVersion = 67 << 16 | 6;
+            }
+
             if (DBG) {
                 log("dbh.onUpgrade:- db=" + db + " oldV=" + oldVersion + " newV=" + newVersion);
             }
@@ -2429,6 +2464,7 @@ public class TelephonyProvider extends ContentProvider
             getIntValueFromCursor(cv, c, SKIP_464XLAT);
             getIntValueFromCursor(cv, c, ALWAYS_ON);
             getIntValueFromCursor(cv, c, INFRASTRUCTURE_BITMASK);
+            getIntValueFromCursor(cv, c, ESIM_BOOTSTRAP_PROVISIONING);
         }
 
         private void copyPreservedApnsToNewTable(SQLiteDatabase db, Cursor c) {
@@ -2653,8 +2689,11 @@ public class TelephonyProvider extends ContentProvider
             addBoolAttribute(parser, "user_visible", map, USER_VISIBLE);
             addBoolAttribute(parser, "user_editable", map, USER_EDITABLE);
             addBoolAttribute(parser, "always_on", map, ALWAYS_ON);
+            addBoolAttribute(parser, "esim_bootstrap_provisioning", map,
+                    ESIM_BOOTSTRAP_PROVISIONING);
 
-            int infrastructureBitmask = ApnSetting.INFRASTRUCTURE_CELLULAR;
+            int infrastructureBitmask =
+                    ApnSetting.INFRASTRUCTURE_CELLULAR | ApnSetting.INFRASTRUCTURE_SATELLITE;
             String infrastructureList = parser.getAttributeValue(null, "infrastructure_bitmask");
             if (infrastructureList != null) {
                 infrastructureBitmask = getInfrastructureListFromString(infrastructureList);
@@ -3860,7 +3899,7 @@ public class TelephonyProvider extends ContentProvider
                 PersistableBundle backedUpSimInfoEntry, int backupDataFormatVersion,
                 String isoCountryCodeFromDb,
                 List<String> wfcRestoreBlockedCountries) {
-            if (DATABASE_VERSION != 65 << 16) {
+            if (DATABASE_VERSION != 67 << 16) {
                 throw new AssertionError("The database schema has been updated which might make "
                     + "the format of #BACKED_UP_SIM_SPECIFIC_SETTINGS_FILE outdated. Make sure to "
                     + "1) review whether any of the columns in #SIM_INFO_COLUMNS_TO_BACKUP have "
@@ -4076,7 +4115,14 @@ public class TelephonyProvider extends ContentProvider
         return queryInternal(url, projectionIn, selection, selectionArgs, sort);
     }
 
-    private synchronized Cursor queryInternal(Uri url, String[] projectionIn, String selection,
+    /**
+     * Internally queries the database.
+     *
+     * Things to keep in mind when writing code for this function:
+     *   - Must be wrapped in synchronized before quering database.
+     *   - Please call external APIs, that use locks, outside of synchronized.
+     */
+    private Cursor queryInternal(Uri url, String[] projectionIn, String selection,
             String[] selectionArgs, String sort) {
         int subId = SubscriptionManager.getDefaultSubscriptionId();
         String subIdString;
@@ -4284,29 +4330,32 @@ public class TelephonyProvider extends ContentProvider
             qb.appendWhere(TextUtils.join(" AND ", constraints));
         }
 
-        SQLiteDatabase db = getReadableDatabase();
-        Cursor ret = null;
-        try {
-            // Exclude entries marked deleted
-            if (CARRIERS_TABLE.equals(qb.getTables())) {
-                if (TextUtils.isEmpty(selection)) {
-                    selection = "";
-                } else {
-                    selection += " and ";
+        synchronized (this) {
+            SQLiteDatabase db = getReadableDatabase();
+            Cursor ret = null;
+            try {
+                // Exclude entries marked deleted
+                if (CARRIERS_TABLE.equals(qb.getTables())) {
+                    if (TextUtils.isEmpty(selection)) {
+                        selection = "";
+                    } else {
+                        selection += " and ";
+                    }
+                    selection += IS_NOT_USER_DELETED + " and "
+                            + IS_NOT_USER_DELETED_BUT_PRESENT_IN_XML + " and "
+                            + IS_NOT_CARRIER_DELETED + " and "
+                            + IS_NOT_CARRIER_DELETED_BUT_PRESENT_IN_XML;
+                    if (VDBG) log("query: selection modified to " + selection);
                 }
-                selection += IS_NOT_USER_DELETED + " and " +
-                        IS_NOT_USER_DELETED_BUT_PRESENT_IN_XML + " and " +
-                        IS_NOT_CARRIER_DELETED + " and " +
-                        IS_NOT_CARRIER_DELETED_BUT_PRESENT_IN_XML;
-                if (VDBG) log("query: selection modified to " + selection);
+                ret = qb.query(db, projectionIn, selection, selectionArgs, null, null, sort);
+            } catch (SQLException e) {
+                loge("got exception when querying: " + e);
             }
-            ret = qb.query(db, projectionIn, selection, selectionArgs, null, null, sort);
-        } catch (SQLException e) {
-            loge("got exception when querying: " + e);
+            if (ret != null) {
+                ret.setNotificationUri(getContext().getContentResolver(), url);
+            }
+            return ret;
         }
-        if (ret != null)
-            ret.setNotificationUri(getContext().getContentResolver(), url);
-        return ret;
     }
 
     /**
@@ -4345,14 +4394,25 @@ public class TelephonyProvider extends ContentProvider
      */
     private Cursor getSubscriptionMatchingAPNList(SQLiteQueryBuilder qb, String[] projectionIn,
             String selection, String[] selectionArgs, String sort, int subId) {
-        Cursor ret;
         Context context = getContext();
-        SubscriptionManager subscriptionManager = (SubscriptionManager) context
+
+        // The SubscriptionManager can use the lock to query tables such as sim_info again, so
+        // calling subscriptionManager should be performed outside of synchronized.
+        final SubscriptionManager subscriptionManager = (SubscriptionManager) context
                 .getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
         if (!subscriptionManager.isActiveSubscriptionId(subId)) {
             return null;
         }
 
+        return getSubscriptionMatchingAPNListSynchronized(qb, projectionIn, selection,
+                selectionArgs, sort, subId);
+    }
+
+    private synchronized Cursor getSubscriptionMatchingAPNListSynchronized(
+            SQLiteQueryBuilder qb, String[] projectionIn, String selection, String[] selectionArgs,
+            String sort, int subId) {
+        Cursor ret;
+        Context context = getContext();
         final TelephonyManager tm = ((TelephonyManager) context
                 .getSystemService(Context.TELEPHONY_SERVICE))
                 .createForSubscriptionId(subId);
