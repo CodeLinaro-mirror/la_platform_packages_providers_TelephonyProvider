@@ -21,7 +21,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
-
+import static org.mockito.Mockito.when;
 
 import android.Manifest;
 import android.content.ContentUris;
@@ -34,8 +34,8 @@ import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Environment;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.PersistableBundle;
 import android.os.Process;
 import android.provider.Telephony;
@@ -45,20 +45,23 @@ import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.test.mock.MockContentResolver;
 import android.test.mock.MockContext;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.text.TextUtils;
 import android.util.Log;
-import com.android.internal.telephony.LocalLog;
+
 import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+
+import com.android.internal.telephony.LocalLog;
+import com.android.internal.telephony.PhoneFactory;
+
+import com.android.internal.telephony.LocalLog;
+import com.android.internal.telephony.PhoneFactory;
 
 import junit.framework.TestCase;
 
 import org.junit.Test;
-import org.mockito.MockitoAnnotations;
 import org.mockito.Mock;
-import static org.mockito.Mockito.when;
-
-import com.android.internal.telephony.PhoneFactory;
+import org.mockito.MockitoAnnotations;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -223,6 +226,7 @@ public class TelephonyProviderTest extends TestCase {
         contentValues.put(Telephony.SimInfo.COLUMN_SATELLITE_ATTACH_ENABLED_FOR_CARRIER,
                 arbitraryIntVal);
         contentValues.put(SimInfo.COLUMN_IS_NTN, arbitraryIntVal);
+        contentValues.put(SimInfo.COLUMN_SERVICE_CAPABILITIES, arbitraryIntVal);
         if (isoCountryCode != null) {
             contentValues.put(Telephony.SimInfo.COLUMN_ISO_COUNTRY_CODE, isoCountryCode);
         }
@@ -723,6 +727,8 @@ public class TelephonyProviderTest extends TestCase {
         final int insertSatelliteEnabled = 1;
         final int insertSatelliteAttachEnabledForCarrier = 1;
         final int insertSatelliteIsNtn = 1;
+        final int insertCellularService =
+                SubscriptionManager.SERVICE_CAPABILITY_DATA_BITMASK;
         contentValues.put(SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID, insertSubId);
         contentValues.put(SubscriptionManager.DISPLAY_NAME, insertDisplayName);
         contentValues.put(SubscriptionManager.CARRIER_NAME, insertCarrierName);
@@ -735,6 +741,7 @@ public class TelephonyProviderTest extends TestCase {
         contentValues.put(SubscriptionManager.SATELLITE_ATTACH_ENABLED_FOR_CARRIER,
                 insertSatelliteAttachEnabledForCarrier);
         contentValues.put(SubscriptionManager.IS_NTN, insertSatelliteIsNtn);
+        contentValues.put(SubscriptionManager.SERVICE_CAPABILITIES, insertCellularService);
 
         Log.d(TAG, "testSimTable Inserting contentValues: " + contentValues);
         mContentResolver.insert(SimInfo.CONTENT_URI, contentValues);
@@ -751,6 +758,7 @@ public class TelephonyProviderTest extends TestCase {
             SubscriptionManager.SATELLITE_ENABLED,
             SubscriptionManager.SATELLITE_ATTACH_ENABLED_FOR_CARRIER,
             SubscriptionManager.IS_NTN,
+            SubscriptionManager.SERVICE_CAPABILITIES,
         };
         final String selection = SubscriptionManager.DISPLAY_NAME + "=?";
         String[] selectionArgs = { insertDisplayName };
@@ -772,6 +780,7 @@ public class TelephonyProviderTest extends TestCase {
         final int resultSatelliteEnabled = cursor.getInt(6);
         final int resultCarrierHandoverToSatelliteEnabledByUser = cursor.getInt(7);
         final int resultSatelliteIsNtn = cursor.getInt(8);
+        final int resultCellularService = cursor.getInt(9);
         assertEquals(insertSubId, resultSubId);
         assertEquals(insertCarrierName, resultCarrierName);
         assertEquals(insertCardId, resultCardId);
@@ -781,6 +790,7 @@ public class TelephonyProviderTest extends TestCase {
         assertEquals(insertSatelliteAttachEnabledForCarrier,
                 resultCarrierHandoverToSatelliteEnabledByUser);
         assertEquals(insertSatelliteIsNtn, resultSatelliteIsNtn);
+        assertEquals(insertCellularService, resultCellularService);
 
         // delete test content
         final String selectionToDelete = SubscriptionManager.DISPLAY_NAME + "=?";

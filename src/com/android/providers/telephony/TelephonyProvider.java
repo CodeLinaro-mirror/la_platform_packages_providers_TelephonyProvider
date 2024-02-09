@@ -164,7 +164,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 67 << 16;
+    private static final int DATABASE_VERSION = 68 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -609,7 +609,9 @@ public class TelephonyProvider extends ContentProvider
                 + Telephony.SimInfo.COLUMN_SATELLITE_ENABLED + " INTEGER DEFAULT 0,"
                 + Telephony.SimInfo.COLUMN_SATELLITE_ATTACH_ENABLED_FOR_CARRIER
                 + " INTEGER DEFAULT 0, "
-                + Telephony.SimInfo.COLUMN_IS_NTN + " INTEGER DEFAULT 0"
+                + Telephony.SimInfo.COLUMN_IS_NTN + " INTEGER DEFAULT 0, "
+                + Telephony.SimInfo.COLUMN_SERVICE_CAPABILITIES + " INTEGER DEFAULT "
+                + SubscriptionManager.getAllServiceCapabilityBitmasks()
                 + ");";
     }
 
@@ -2013,6 +2015,21 @@ public class TelephonyProvider extends ContentProvider
                     }
                 }
                 oldVersion = 67 << 16 | 6;
+            }
+
+            if (oldVersion < (68 << 16 | 6)) {
+                try {
+                    db.execSQL("ALTER TABLE " + SIMINFO_TABLE + " ADD COLUMN "
+                            + Telephony.SimInfo.COLUMN_SERVICE_CAPABILITIES
+                            + " INTEGER DEFAULT 7;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade failed to update " + SIMINFO_TABLE
+                                + " to add cellular service capabilities");
+                    }
+
+                }
+                oldVersion = 68 << 16 | 6;
             }
 
             if (DBG) {
@@ -3899,7 +3916,7 @@ public class TelephonyProvider extends ContentProvider
                 PersistableBundle backedUpSimInfoEntry, int backupDataFormatVersion,
                 String isoCountryCodeFromDb,
                 List<String> wfcRestoreBlockedCountries) {
-            if (DATABASE_VERSION != 67 << 16) {
+            if (DATABASE_VERSION != 68 << 16) {
                 throw new AssertionError("The database schema has been updated which might make "
                     + "the format of #BACKED_UP_SIM_SPECIFIC_SETTINGS_FILE outdated. Make sure to "
                     + "1) review whether any of the columns in #SIM_INFO_COLUMNS_TO_BACKUP have "
@@ -4143,7 +4160,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return null;
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 qb.appendWhereStandalone(IS_NOT_OWNED_BY_DPC);
                 return getSubscriptionMatchingAPNList(qb, projectionIn, selection, selectionArgs,
                         sort, subId);
@@ -4164,7 +4180,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return null;
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // TODO b/74213956 turn this back on once insertion includes correct sub id
                 // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
@@ -4192,7 +4207,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return null;
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // TODO b/74213956 turn this back on once insertion includes correct sub id
                 // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
@@ -4211,7 +4225,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return null;
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // TODO b/74213956 turn this back on once insertion includes correct sub id
                 // constraints.add(SUBSCRIPTION_ID + "=" + subIdString);
             }
@@ -4614,7 +4627,7 @@ public class TelephonyProvider extends ContentProvider
      *
      * @param values the value that caller wants to insert
      * @return a pair in which the first element refers to the Uri for the row inserted, the second
-     *         element refers to whether sends out nofitication.
+     *         element refers to whether sends out notification.
      */
     private Pair<Uri, Boolean> insertRowWithValue(ContentValues values) {
         Uri result = null;
@@ -4629,7 +4642,7 @@ public class TelephonyProvider extends ContentProvider
                 result = ContentUris.withAppendedId(CONTENT_URI, rowID);
                 notify = true;
             }
-            if (VDBG) log("insert: inserted " + values.toString() + " rowID = " + rowID);
+            if (DBG) log("insert: inserted " + values + ", rowID = " + rowID);
         } catch (SQLException e) {
             log("insert: exception " + e);
             // Insertion failed which could be due to a conflict. Check if that is the case
@@ -4667,7 +4680,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return Pair.create(result, notify);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
             }
             //intentional fall through from above case
 
@@ -4702,7 +4714,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return Pair.create(result, notify);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // FIXME use subId in the query
             }
             //intentional fall through from above case
@@ -4737,7 +4748,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     return Pair.create(result, notify);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
             }
             //intentional fall through from above case
 
@@ -4828,7 +4838,6 @@ public class TelephonyProvider extends ContentProvider
                      loge("NumberFormatException" + e);
                      throw new IllegalArgumentException("Invalid subId " + url);
                  }
-                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // FIXME use subId in query
             }
             //intentional fall through from above case
@@ -4852,7 +4861,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 // FIXME use subId in query
             }
             //intentional fall through from above case
@@ -4891,7 +4899,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
             }
             // intentional fall through from above case
 
@@ -4913,7 +4920,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
             }
             //intentional fall through from above case
 
@@ -4981,7 +4987,6 @@ public class TelephonyProvider extends ContentProvider
                      loge("NumberFormatException" + e);
                      throw new IllegalArgumentException("Invalid subId " + url);
                  }
-                 if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 //FIXME use subId in the query
             }
             //intentional fall through from above case
@@ -5010,7 +5015,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 //FIXME use subId in the query
             }
             //intentional fall through from above case
@@ -5071,7 +5075,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
             }
 
             case URL_PREFERAPN:
@@ -5123,7 +5126,6 @@ public class TelephonyProvider extends ContentProvider
                     loge("NumberFormatException" + e);
                     throw new IllegalArgumentException("Invalid subId " + url);
                 }
-                if (DBG) log("subIdString = " + subIdString + " subId = " + subId);
                 if (where != null || whereArgs != null) {
                     throw new UnsupportedOperationException(
                             "Cannot update URL " + url + " with a where clause");
@@ -5253,6 +5255,13 @@ public class TelephonyProvider extends ContentProvider
                         getContext().getContentResolver().notifyChange(getNotifyContentUri(
                                 Uri.withAppendedPath(Telephony.SimInfo.CONTENT_URI,
                                         Telephony.SimInfo.COLUMN_ENABLED_MOBILE_DATA_POLICIES),
+                                usingSubId, subId), null, true, UserHandle.USER_ALL);
+                    }
+                    if (values.containsKey(
+                            Telephony.SimInfo.COLUMN_SERVICE_CAPABILITIES)) {
+                        getContext().getContentResolver().notifyChange(getNotifyContentUri(
+                                Uri.withAppendedPath(Telephony.SimInfo.CONTENT_URI,
+                                        Telephony.SimInfo.COLUMN_SERVICE_CAPABILITIES),
                                 usingSubId, subId), null, true, UserHandle.USER_ALL);
                     }
                     break;
