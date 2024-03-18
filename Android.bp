@@ -16,6 +16,7 @@ android_app {
     "telephonyprovider-protos",
     "android-support-v4"
     ],
+    generate_product_characteristics_rro: true,
 }
 
 filegroup {
