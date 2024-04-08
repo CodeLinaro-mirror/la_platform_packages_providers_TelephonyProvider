@@ -286,6 +286,14 @@ public class TelephonyProvider extends ContentProvider
 
     private boolean mManagedApnEnforced;
 
+    /**
+     * Lazy tracking SubscriptionManager#getDefaultSubscriptionId for db operation to prevent race
+     * condition.
+     * Make sure the call is outside of instance synchronization to prevent dead lock between
+     * SubscriptionManager lock and telephony provider lock.
+     */
+    private int mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+
     private final LocalLog mLocalLog = new LocalLog(128);
 
     /**
@@ -727,10 +735,15 @@ public class TelephonyProvider extends ContentProvider
         }
     }
 
-    static public ContentValues setDefaultValue(ContentValues values) {
+
+    /**
+     * Put the default subscription Id into the provided convent values.
+     * @param values The content values to populate.
+     * @return The populated content values.
+     */
+    public ContentValues setDefaultValue(ContentValues values) {
         if (!values.containsKey(SUBSCRIPTION_ID)) {
-            int subId = SubscriptionManager.getDefaultSubscriptionId();
-            values.put(SUBSCRIPTION_ID, subId);
+            values.put(SUBSCRIPTION_ID, mDefaultSubId);
         }
 
         return values;
@@ -890,11 +903,7 @@ public class TelephonyProvider extends ContentProvider
             long oldChecksum = getApnConfChecksum();
             if (DBG) log("newChecksum: " + newChecksum);
             if (DBG) log("oldChecksum: " + oldChecksum);
-            if (newChecksum == oldChecksum) {
-                return false;
-            } else {
-                return true;
-            }
+            return newChecksum != oldChecksum;
         }
 
         /**
@@ -3335,6 +3344,7 @@ public class TelephonyProvider extends ContentProvider
     @Override
     public boolean onCreate() {
         mOpenHelper = new DatabaseHelper(getContext());
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
         boolean isNewBuild = false;
         String newBuildId = SystemProperties.get("ro.build.id", null);
         SharedPreferences sp = getContext().getSharedPreferences(BUILD_ID_FILE,
@@ -4204,6 +4214,7 @@ public class TelephonyProvider extends ContentProvider
         int match = s_urlMatcher.match(url);
         checkPermissionCompat(match, projectionIn);
 
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
         return queryInternal(url, projectionIn, selection, selectionArgs, sort);
     }
 
@@ -4216,7 +4227,7 @@ public class TelephonyProvider extends ContentProvider
      */
     private Cursor queryInternal(Uri url, String[] projectionIn, String selection,
             String[] selectionArgs, String sort) {
-        int subId = SubscriptionManager.getDefaultSubscriptionId();
+        int subId = mDefaultSubId;
         String subIdString;
         SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
         qb.setStrict(true); // a little protection from injection attacks
@@ -4660,8 +4671,11 @@ public class TelephonyProvider extends ContentProvider
      * Insert an array of ContentValues and call notifyChange at the end.
      */
     @Override
-    public synchronized int bulkInsert(Uri url, ContentValues[] values) {
-        return unsynchronizedBulkInsert(url, values);
+    public int bulkInsert(Uri url, ContentValues[] values) {
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+        synchronized (this) {
+            return unsynchronizedBulkInsert(url, values);
+        }
     }
 
     /**
@@ -4688,7 +4702,12 @@ public class TelephonyProvider extends ContentProvider
     }
 
     @Override
-    public synchronized Uri insert(Uri url, ContentValues initialValues) {
+    public Uri insert(Uri url, ContentValues initialValues) {
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+        return insertSynchronized(url, initialValues);
+    }
+
+    private synchronized Uri insertSynchronized(Uri url, ContentValues initialValues) {
         Pair<Uri, Boolean> rowAndNotify = insertSingleRow(url, initialValues);
         if (rowAndNotify.second) {
             getContext().getContentResolver().notifyChange(CONTENT_URI, null,
@@ -4736,7 +4755,7 @@ public class TelephonyProvider extends ContentProvider
 
     private Pair<Uri, Boolean> insertSingleRow(Uri url, ContentValues initialValues) {
         Uri result = null;
-        int subId = SubscriptionManager.getDefaultSubscriptionId();
+        int subId = mDefaultSubId;
 
         int match = s_urlMatcher.match(url);
         checkPermission(match);
@@ -4748,13 +4767,7 @@ public class TelephonyProvider extends ContentProvider
         {
             case URL_TELEPHONY_USING_SUBID:
             {
-                String subIdString = url.getLastPathSegment();
-                try {
-                    subId = Integer.parseInt(subIdString);
-                } catch (NumberFormatException e) {
-                    loge("NumberFormatException" + e);
-                    return Pair.create(result, notify);
-                }
+                loge("insert carriers/subId/* is not supported, treat as carriers");
             }
             //intentional fall through from above case
 
@@ -4782,14 +4795,7 @@ public class TelephonyProvider extends ContentProvider
 
             case URL_CURRENT_USING_SUBID:
             {
-                String subIdString = url.getLastPathSegment();
-                try {
-                    subId = Integer.parseInt(subIdString);
-                } catch (NumberFormatException e) {
-                    loge("NumberFormatException" + e);
-                    return Pair.create(result, notify);
-                }
-                // FIXME use subId in the query
+                loge("insert carriers/current/subId/* is not supported, treat as carriers/current");
             }
             //intentional fall through from above case
 
@@ -4875,9 +4881,14 @@ public class TelephonyProvider extends ContentProvider
     }
 
     @Override
-    public synchronized int delete(Uri url, String where, String[] whereArgs) {
+    public int delete(Uri url, String where, String[] whereArgs) {
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+        return deleteSynchronized(url, where, whereArgs);
+    }
+
+    private synchronized int deleteSynchronized(Uri url, String where, String[] whereArgs) {
         int count = 0;
-        int subId = SubscriptionManager.getDefaultSubscriptionId();
+        int subId = mDefaultSubId;
         String userOrCarrierEdited = ") and (" +
                 IS_USER_EDITED +  " or " +
                 IS_CARRIER_EDITED + ")";
@@ -4906,14 +4917,7 @@ public class TelephonyProvider extends ContentProvider
 
             case URL_TELEPHONY_USING_SUBID:
             {
-                 String subIdString = url.getLastPathSegment();
-                 try {
-                     subId = Integer.parseInt(subIdString);
-                 } catch (NumberFormatException e) {
-                     loge("NumberFormatException" + e);
-                     throw new IllegalArgumentException("Invalid subId " + url);
-                 }
-                // FIXME use subId in query
+                loge("delete carriers/subId/* is not supported, treat as carriers");
             }
             //intentional fall through from above case
 
@@ -4929,14 +4933,7 @@ public class TelephonyProvider extends ContentProvider
             }
 
             case URL_CURRENT_USING_SUBID: {
-                String subIdString = url.getLastPathSegment();
-                try {
-                    subId = Integer.parseInt(subIdString);
-                } catch (NumberFormatException e) {
-                    loge("NumberFormatException" + e);
-                    throw new IllegalArgumentException("Invalid subId " + url);
-                }
-                // FIXME use subId in query
+                loge("delete carriers/current/subId/* is not supported, treat as carriers/current");
             }
             //intentional fall through from above case
 
@@ -5040,11 +5037,17 @@ public class TelephonyProvider extends ContentProvider
     }
 
     @Override
-    public synchronized int update(Uri url, ContentValues values, String where, String[] whereArgs)
+    public int update(Uri url, ContentValues values, String where, String[] whereArgs)
     {
+        mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
+        return updateSynchronized(url, values, where, whereArgs);
+    }
+
+    private synchronized int updateSynchronized(Uri url, ContentValues values, String where,
+            String[] whereArgs) {
         int count = 0;
         int uriType = URL_UNKNOWN;
-        int subId = SubscriptionManager.getDefaultSubscriptionId();
+        int subId = mDefaultSubId;
 
         int match = s_urlMatcher.match(url);
         checkPermission(match);
@@ -5055,14 +5058,7 @@ public class TelephonyProvider extends ContentProvider
         {
             case URL_TELEPHONY_USING_SUBID:
             {
-                 String subIdString = url.getLastPathSegment();
-                 try {
-                     subId = Integer.parseInt(subIdString);
-                 } catch (NumberFormatException e) {
-                     loge("NumberFormatException" + e);
-                     throw new IllegalArgumentException("Invalid subId " + url);
-                 }
-                //FIXME use subId in the query
+                loge("insert carriers/subId/* is not supported, treat as carriers");
             }
             //intentional fall through from above case
 
@@ -5083,14 +5079,7 @@ public class TelephonyProvider extends ContentProvider
 
             case URL_CURRENT_USING_SUBID:
             {
-                String subIdString = url.getLastPathSegment();
-                try {
-                    subId = Integer.parseInt(subIdString);
-                } catch (NumberFormatException e) {
-                    loge("NumberFormatException" + e);
-                    throw new IllegalArgumentException("Invalid subId " + url);
-                }
-                //FIXME use subId in the query
+                loge("insert carriers/current/subId/* is not supported, treat as carriers/current");
             }
             //intentional fall through from above case
 
@@ -5121,7 +5110,7 @@ public class TelephonyProvider extends ContentProvider
 
                 try {
                     count = db.updateWithOnConflict(CARRIERS_TABLE, values, _ID + "=?" + " and " +
-                            IS_NOT_OWNED_BY_DPC, new String[] { rowID },
+                                    IS_NOT_OWNED_BY_DPC, new String[] { rowID },
                             SQLiteDatabase.CONFLICT_ABORT);
                 } catch (SQLException e) {
                     // Update failed which could be due to a conflict. Check if that is
@@ -5298,9 +5287,9 @@ public class TelephonyProvider extends ContentProvider
                     }
                     if (values.containsKey(Telephony.SimInfo.COLUMN_IMS_RCS_UCE_ENABLED)) {
                         getContext().getContentResolver().notifyChange(getNotifyContentUri(
-                                Uri.withAppendedPath(Telephony.SimInfo.CONTENT_URI,
-                                        Telephony.SimInfo.COLUMN_IMS_RCS_UCE_ENABLED), usingSubId, subId),
-                                null, true, UserHandle.USER_ALL);
+                                        Uri.withAppendedPath(Telephony.SimInfo.CONTENT_URI,
+                                                Telephony.SimInfo.COLUMN_IMS_RCS_UCE_ENABLED),
+                                        usingSubId, subId), null, true, UserHandle.USER_ALL);
                     }
                     if (values.containsKey(Telephony.SimInfo.COLUMN_CROSS_SIM_CALLING_ENABLED)) {
                         getContext().getContentResolver().notifyChange(getNotifyContentUri(
