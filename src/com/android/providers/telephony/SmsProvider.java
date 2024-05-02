@@ -928,18 +928,11 @@ public class SmsProvider extends ContentProvider {
                 address = values.getAsString(Sms.ADDRESS);
             }
 
-            if (ProviderUtil.sFeatureFlag.rejectBadSubIdInteraction()) {
-                if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID
-                        && !TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(),
-                        subId, callerUserHandle, address)) {
-                    TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(),
-                            subId, callerUid, callerPkg);
-                    return null;
-                }
-            } else if (!TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(),
+            if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID
+                    && !TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(),
                     subId, callerUserHandle, address)) {
-                TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(), subId,
-                        callerUid, callerPkg);
+                TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(),
+                        subId, callerUid, callerPkg);
                 return null;
             }
         }
