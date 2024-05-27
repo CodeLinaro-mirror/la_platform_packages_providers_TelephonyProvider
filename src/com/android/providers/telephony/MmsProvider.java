@@ -942,7 +942,6 @@ public class MmsProvider extends ContentProvider {
             String[] selectionArgs) {
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         int match = sURLMatcher.match(uri);
-        String callingPackage = getCallingPackage();
         if (LOCAL_LOGV) {
             Log.v(TAG, "Delete uri=" + uri + ", match=" + match);
         }
@@ -997,9 +996,12 @@ public class MmsProvider extends ContentProvider {
 
         String finalSelection = concatSelections(selection, extraSelection);
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
+        String debugMessage = getCallingPackage() + ";MmsProvider.delete;" + uri;
+        // Always log delete for debug purpose, as delete is a critical but non-frequent operation.
+        Log.d(TAG, debugMessage);
         if (mOpenHelper instanceof MmsSmsDatabaseHelper) {
             ((MmsSmsDatabaseHelper) mOpenHelper).addDatabaseOpeningDebugLog(
-                    callingPackage + ";MmsProvider.insert;" + uri, false);
+                    debugMessage, false);
         }
         int deletedRows = 0;
 
