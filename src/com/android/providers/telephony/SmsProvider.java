@@ -22,9 +22,6 @@ import static android.telephony.SmsMessage.ENCODING_UNKNOWN;
 import static android.telephony.SmsMessage.MAX_USER_DATA_BYTES;
 import static android.telephony.SmsMessage.MAX_USER_DATA_SEPTETS;
 
-import static android.content.pm.PackageManager.PERMISSION_GRANTED;
-
-import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.SuppressLint;
 import android.app.AppOpsManager;
@@ -236,6 +233,13 @@ public class SmsProvider extends ContentProvider {
                 Log.w(TAG, "Query rejected: " + e.getMessage());
                 return null;
             }
+        }
+
+        try {
+            SqlQueryChecker.checkSelection(selection);
+        } catch (IllegalArgumentException e) {
+            Log.w(TAG, "Query rejected: " + e.getMessage());
+            return null;
         }
 
         Cursor emptyCursor = new MatrixCursor((projectionIn == null) ?
@@ -1437,14 +1441,9 @@ public class SmsProvider extends ContentProvider {
 
     }
 
+    @SuppressLint("MissingPermission")
     private boolean canReadOtpSms(int uid, String packageName) {
-        if (getContext().checkPermission(Manifest.permission.RECEIVE_SENSITIVE_NOTIFICATIONS,
-                -1, uid) == PERMISSION_GRANTED) {
-            return true;
-        }
-        int op = getContext().getSystemService(AppOpsManager.class).noteOpNoThrow(
-                AppOpsManager.OP_RECEIVE_SENSITIVE_NOTIFICATIONS, uid, packageName, null, null);
-        return op == AppOpsManager.MODE_ALLOWED;
+        return SmsManager.isAppTrustedForSmsOtp(getContext(), packageName, uid);
     }
 
     /**
