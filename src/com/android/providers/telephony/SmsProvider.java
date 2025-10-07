@@ -22,9 +22,6 @@ import static android.telephony.SmsMessage.ENCODING_UNKNOWN;
 import static android.telephony.SmsMessage.MAX_USER_DATA_BYTES;
 import static android.telephony.SmsMessage.MAX_USER_DATA_SEPTETS;
 
-import static android.content.pm.PackageManager.PERMISSION_GRANTED;
-
-import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.SuppressLint;
 import android.app.AppOpsManager;
@@ -48,6 +45,7 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
@@ -72,6 +70,7 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.text.SimpleDateFormat;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.telephony.SmsApplication;
 import com.android.internal.telephony.TelephonyPermissions;
 import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.util.TelephonyUtils;
@@ -163,7 +162,7 @@ public class SmsProvider extends ContentProvider {
     };
     private static final TextClassifier.EntityConfig TC_REQUEST_CONFIG =
             new TextClassifier.EntityConfig.Builder()
-                    .setIncludedTypes(List.of(TextClassifier.TYPE_OTP))
+                    .setIncludedTypes(List.of(TextClassifier.TYPE_SMS_RETRIEVER_OTP))
                     .includeTypesFromTextClassifier(false)
                     .build();
 
@@ -236,6 +235,13 @@ public class SmsProvider extends ContentProvider {
                 Log.w(TAG, "Query rejected: " + e.getMessage());
                 return null;
             }
+        }
+
+        try {
+            SqlQueryChecker.checkSelection(selection);
+        } catch (IllegalArgumentException e) {
+            Log.w(TAG, "Query rejected: " + e.getMessage());
+            return null;
         }
 
         Cursor emptyCursor = new MatrixCursor((projectionIn == null) ?
@@ -337,6 +343,10 @@ public class SmsProvider extends ContentProvider {
                 break;
 
             case SMS_RAW_MESSAGE:
+                if (!canReadRawTable(callingUid, callingPackage)) {
+                    // Only the phone, system server, and default SMS app can query the raw table
+                    return null;
+                }
                 // before querying purge old entries with deleted = 1
                 purgeDeletedMessagesInRawTable(db);
                 qb.setTables("raw");
@@ -487,26 +497,39 @@ public class SmsProvider extends ContentProvider {
             orderBy = Sms.DEFAULT_SORT_ORDER;
         }
 
-        if (Flags.redactOtpSms() && smsTable.equals(qb.getTables()) && !canReadOtpSms(callingUid,
-                callingPackage)) {
-            // If this app can't read OTP messages, only return messages without OTPs, or messages
-            // more than the threshold old, or messages still pending classification, past the
-            // classification cutoff time.
-            long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
-            long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
-            @SuppressLint("DefaultLocale")
-            String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
-                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
-                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
-            qb.appendWhereStandalone(where);
-        }
+        try {
+            Trace.beginSection("SmsProvider_query_otpSection");
+            if (Flags.redactOtpSms() && qb.getTables().startsWith(smsTable)
+                    && !canReadOtpSms(callingUid, callingPackage)) {
+                // If this app can't read OTP messages, only return messages without OTPs, or
+                // messages more than the threshold old, or messages still pending classification,
+                // past the classification cutoff time.
+                long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
+                long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
+                @SuppressLint("DefaultLocale")
+                String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
+                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
+                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
+                qb.appendWhereStandalone(where);
+            }
 
-        Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
-                              null, null, orderBy);
-        // TODO: Since the URLs are a mess, always use content://sms
-        ret.setNotificationUri(getContext().getContentResolver(),
-                NOTIFICATION_URI);
-        return ret;
+            Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
+                    null, null, orderBy);
+            // TODO: Since the URLs are a mess, always use content://sms
+            ret.setNotificationUri(getContext().getContentResolver(),
+                    NOTIFICATION_URI);
+            return ret;
+        } finally {
+            Trace.endSection();
+        }
+    }
+
+    protected boolean canReadRawTable(int uid, String packageName) {
+        if (!Flags.limitRawTableVisibility()) {
+            return true;
+        }
+        return TelephonyPermissions.isSystemOrPhone(uid)
+                || SmsApplication.isDefaultSmsApplication(getContext(), packageName);
     }
 
     private void purgeDeletedMessagesInRawTable(SQLiteDatabase db) {
@@ -1403,26 +1426,27 @@ public class SmsProvider extends ContentProvider {
 
     private void scheduleOtpCheck(Uri uri, String text) {
         mBackgroundExecutor.execute(() -> {
-            TextLinks.Request request =
-                    new TextLinks.Request.Builder(text).setEntityConfig(TC_REQUEST_CONFIG).build();
+            try {
+                Trace.beginSection("scheduleOtpCheck");
+                TextLinks.Request request =
+                        new TextLinks.Request.Builder(text).setEntityConfig(
+                                TC_REQUEST_CONFIG).build();
 
-            TextLinks links = mTextClassifier.generateLinks(request);
+                TextLinks links = mTextClassifier.generateLinks(request);
 
-            int otpType = Sms.OTP_TYPE_NONE;
-            for (TextLinks.TextLink link : links.getLinks()) {
-                for (int i = 0; i < link.getEntityCount(); i++) {
-                    if (link.getEntity(i).equals(TextClassifier.TYPE_OTP)) {
-                        otpType = Sms.OTP_TYPE_CONTAINS_OTP;
-                        break;
+                int otpType = Sms.OTP_TYPE_NONE;
+                for (TextLinks.TextLink link : links.getLinks()) {
+                    for (int i = 0; i < link.getEntityCount(); i++) {
+                        if (link.getEntity(i).equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)) {
+                            otpType = Sms.OTP_TYPE_CONTAINS_OTP;
+                            break;
+                        }
                     }
                 }
-            }
-            final int finalOtpType = otpType;
-            mBackgroundExecutor.execute(() -> {
                 ContentValues values = new ContentValues();
-                values.put(Sms.CONTAINS_OTP, finalOtpType);
+                values.put(Sms.CONTAINS_OTP, otpType);
                 update(uri, values, null);
-                if (finalOtpType == Sms.OTP_TYPE_CONTAINS_OTP) {
+                if (otpType == Sms.OTP_TYPE_CONTAINS_OTP) {
                     // Schedule an update for when the OTP hiding time expires, to remove the "has
                     // otp" value. This is best-effort, not guaranteed.
                     mMainThreadHandler.postDelayed(() -> {
@@ -1431,20 +1455,15 @@ public class SmsProvider extends ContentProvider {
                         update(uri, unredacted, null);
                     }, OTP_HIDING_TIME_MS);
                 }
-            });
-
+            } finally {
+                Trace.endSection();
+            }
         });
-
     }
 
-    private boolean canReadOtpSms(int uid, String packageName) {
-        if (getContext().checkPermission(Manifest.permission.RECEIVE_SENSITIVE_NOTIFICATIONS,
-                -1, uid) == PERMISSION_GRANTED) {
-            return true;
-        }
-        int op = getContext().getSystemService(AppOpsManager.class).noteOpNoThrow(
-                AppOpsManager.OP_RECEIVE_SENSITIVE_NOTIFICATIONS, uid, packageName, null, null);
-        return op == AppOpsManager.MODE_ALLOWED;
+    @SuppressLint("MissingPermission")
+    protected boolean canReadOtpSms(int uid, String packageName) {
+        return SmsManager.isAppTrustedForSmsOtp(getContext(), packageName, uid);
     }
 
     /**
