@@ -275,6 +275,7 @@ public class TelephonyProviderTest {
                 arbitraryStringVal);
         contentValues.put(SimInfo.COLUMN_SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY,
                 arbitraryStringVal);
+        contentValues.put(SimInfo.COLUMN_IS_PRIVATE_NETWORK, arbitraryIntVal);
         return contentValues;
     }
 
@@ -781,6 +782,8 @@ public class TelephonyProviderTest {
         final String insertSatelliteEntitlementServiceTypeMap = "exampleServiceTypeMap";
         final String insertSatelliteEntitlementDataServicePolicy = "exampleDataServicePolicy";
         final String insertSatelliteEntitlementVoiceServicePolicy = "exampleVoiceServicePolicy";
+        final String insertNumberFromTs43 = "123456789";
+        final int insertIsPrivateNetwork = 1;
         contentValues.put(SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID, insertSubId);
         contentValues.put(SubscriptionManager.DISPLAY_NAME, insertDisplayName);
         contentValues.put(SubscriptionManager.CARRIER_NAME, insertCarrierName);
@@ -812,6 +815,8 @@ public class TelephonyProviderTest {
                 insertSatelliteEntitlementDataServicePolicy);
         contentValues.put(SubscriptionManager.SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY,
                 insertSatelliteEntitlementVoiceServicePolicy);
+        contentValues.put(SimInfo.COLUMN_PHONE_NUMBER_SOURCE_TS43, insertNumberFromTs43);
+        contentValues.put(SubscriptionManager.IS_PRIVATE_NETWORK, insertIsPrivateNetwork);
 
         Log.d(TAG, "testSimTable Inserting contentValues: " + contentValues);
         mContentResolver.insert(SimInfo.CONTENT_URI, contentValues);
@@ -838,7 +843,9 @@ public class TelephonyProviderTest {
             SubscriptionManager.SATELLITE_ENTITLEMENT_DATA_PLAN_PLMNS,
             SubscriptionManager.SATELLITE_ENTITLEMENT_SERVICE_TYPE_MAP,
             SubscriptionManager.SATELLITE_ENTITLEMENT_DATA_SERVICE_POLICY,
-            SubscriptionManager.SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY
+            SubscriptionManager.SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY,
+            Telephony.SimInfo.COLUMN_PHONE_NUMBER_SOURCE_TS43,
+            SubscriptionManager.IS_PRIVATE_NETWORK
         };
         final String selection = SubscriptionManager.DISPLAY_NAME + "=?";
         String[] selectionArgs = { insertDisplayName };
@@ -871,6 +878,8 @@ public class TelephonyProviderTest {
         final String resultSatelliteEntitlementServiceTypeMap = cursor.getString(17);
         final String resultSatelliteEntitlementDataServicePolicy = cursor.getString(18);
         final String resultSatelliteEntitlementVoiceServicePolicy = cursor.getString(19);
+        final String resultNumberFromTs43 = cursor.getString(20);
+        final int resultIsPrivateNetwork = cursor.getInt(21);
         assertEquals(insertSubId, resultSubId);
         assertEquals(insertCarrierName, resultCarrierName);
         assertEquals(insertCardId, resultCardId);
@@ -895,6 +904,8 @@ public class TelephonyProviderTest {
                 resultSatelliteEntitlementDataServicePolicy);
         assertEquals(insertSatelliteEntitlementVoiceServicePolicy,
                 resultSatelliteEntitlementVoiceServicePolicy);
+        assertEquals(insertNumberFromTs43, resultNumberFromTs43);
+        assertEquals(insertIsPrivateNetwork, resultIsPrivateNetwork);
 
 
         // delete test content

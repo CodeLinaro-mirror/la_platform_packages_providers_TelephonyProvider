@@ -165,7 +165,7 @@ public class TelephonyProvider extends ContentProvider
     private static final boolean DBG = true;
     private static final boolean VDBG = false; // STOPSHIP if true
 
-    private static final int DATABASE_VERSION = 74 << 16;
+    private static final int DATABASE_VERSION = 76 << 16;
     private static final int URL_UNKNOWN = 0;
     private static final int URL_TELEPHONY = 1;
     private static final int URL_CURRENT = 2;
@@ -504,6 +504,8 @@ public class TelephonyProvider extends ContentProvider
         SIM_INFO_COLUMNS_TO_BACKUP.put(
                 Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY,
                 Cursor.FIELD_TYPE_STRING);
+        SIM_INFO_COLUMNS_TO_BACKUP.put(
+                Telephony.SimInfo.COLUMN_IS_PRIVATE_NETWORK, Cursor.FIELD_TYPE_INTEGER);
     }
 
     @VisibleForTesting
@@ -639,6 +641,7 @@ public class TelephonyProvider extends ContentProvider
                 + Telephony.SimInfo.COLUMN_NR_ADVANCED_CALLING_ENABLED + " INTEGER DEFAULT -1,"
                 + Telephony.SimInfo.COLUMN_PHONE_NUMBER_SOURCE_CARRIER + " TEXT,"
                 + Telephony.SimInfo.COLUMN_PHONE_NUMBER_SOURCE_IMS + " TEXT,"
+                + Telephony.SimInfo.COLUMN_PHONE_NUMBER_SOURCE_TS43 + " TEXT,"
                 + Telephony.SimInfo.COLUMN_PORT_INDEX + "  INTEGER DEFAULT -1,"
                 + Telephony.SimInfo.COLUMN_USAGE_SETTING + " INTEGER DEFAULT "
                 + SubscriptionManager.USAGE_SETTING_UNKNOWN + ","
@@ -662,7 +665,8 @@ public class TelephonyProvider extends ContentProvider
                 + Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_DATA_PLAN_PLMNS + " TEXT,"
                 + Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_SERVICE_TYPE_MAP + " TEXT,"
                 + Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_DATA_SERVICE_POLICY + " TEXT,"
-                + Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY + " TEXT"
+                + Telephony.SimInfo.COLUMN_SATELLITE_ENTITLEMENT_VOICE_SERVICE_POLICY + " TEXT,"
+                + Telephony.SimInfo.COLUMN_IS_PRIVATE_NETWORK + " INTEGER DEFAULT 0"
                 + ");";
     }
 
@@ -2247,6 +2251,37 @@ public class TelephonyProvider extends ContentProvider
                 }
                 oldVersion = 74 << 16 | 6;
             }
+
+            if (oldVersion < (75 << 16 | 6)) {
+                try {
+                    // Try to update the siminfo table with new columns.
+                    db.execSQL("ALTER TABLE " + SIMINFO_TABLE + " ADD COLUMN "
+                            + Telephony.SimInfo.COLUMN_PHONE_NUMBER_SOURCE_TS43
+                            + " TEXT;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade failed to update " + SIMINFO_TABLE
+                                + " to add phone numbers. ");
+                    }
+                }
+                oldVersion = 75 << 16 | 6;
+            }
+
+            if (oldVersion < (76 << 16 | 6)) {
+                try {
+                    // Try to update the siminfo table with new columns.
+                    db.execSQL("ALTER TABLE " + SIMINFO_TABLE + " ADD COLUMN "
+                            + Telephony.SimInfo.COLUMN_IS_PRIVATE_NETWORK
+                            + " INTEGER DEFAULT 0;");
+                } catch (SQLiteException e) {
+                    if (DBG) {
+                        log("onUpgrade failed to update " + SIMINFO_TABLE
+                                + " to add is private network.");
+                    }
+                }
+                oldVersion = 76 << 16 | 6;
+            }
+
             if (DBG) {
                 log("dbh.onUpgrade:- db=" + db + " oldV=" + oldVersion + " newV=" + newVersion);
             }
@@ -4129,7 +4164,7 @@ public class TelephonyProvider extends ContentProvider
                 PersistableBundle backedUpSimInfoEntry, int backupDataFormatVersion,
                 String isoCountryCodeFromDb, String allowedNetworkTypesForReasonsFromDb,
                 List<String> wfcRestoreBlockedCountries) {
-            if (DATABASE_VERSION != 74 << 16) {
+            if (DATABASE_VERSION != 76 << 16) {
                 throw new AssertionError("The database schema has been updated which might make "
                     + "the format of #BACKED_UP_SIM_SPECIFIC_SETTINGS_FILE outdated. Make sure to "
                     + "1) review whether any of the columns in #SIM_INFO_COLUMNS_TO_BACKUP have "
