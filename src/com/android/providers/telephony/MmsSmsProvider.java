@@ -513,11 +513,11 @@ public class MmsSmsProvider extends ContentProvider {
                     return emptyCursor;
                 }
                 selection = DatabaseUtils.concatenateWhere(selection, selectionBySubIds);
-                if (Flags.secureAccessToRestrictedRcsMessages())
+                if (Flags.secureAccessToRestrictedRcsMessages() && !canReadRestrictedMessages) {
                     selection = DatabaseUtils.concatenateWhere(selection,
-                    CanonicalAddressesColumns.READ_RESTRICTION + " & "
-                    + ReadRestrictionValues.READ_RESTRICTION_RESTRICTED + " = 0 OR "
-                    + canReadRestrictedMessages);
+                    CanonicalAddressesColumns.READ_RESTRICTION + " & "+
+                    ReadRestrictionValues.READ_RESTRICTION_RESTRICTED + " = 0");
+                }
 
                 String extraSelection = "_id=" + uri.getPathSegments().get(1);
                 String finalSelection = TextUtils.isEmpty(selection)
@@ -537,11 +537,11 @@ public class MmsSmsProvider extends ContentProvider {
                     return emptyCursor;
                 }
                 selection = DatabaseUtils.concatenateWhere(selection, selectionBySubIds);
-                if (Flags.secureAccessToRestrictedRcsMessages())
+                if (Flags.secureAccessToRestrictedRcsMessages() && !canReadRestrictedMessages) {
                     selection = DatabaseUtils.concatenateWhere(selection,
-                     CanonicalAddressesColumns.READ_RESTRICTION + " & "
-                    + ReadRestrictionValues.READ_RESTRICTION_RESTRICTED + " = 0) OR "
-                    + canReadRestrictedMessages);
+                    CanonicalAddressesColumns.READ_RESTRICTION + " & " +
+                    ReadRestrictionValues.READ_RESTRICTION_RESTRICTED + " = 0");
+                }
 
                 cursor = db.query(TABLE_CANONICAL_ADDRESSES,
                         CANONICAL_ADDRESSES_COLUMNS_2,
@@ -797,7 +797,6 @@ public class MmsSmsProvider extends ContentProvider {
     /**
      * Return the canonical address ID for this address.
      */
-    // TODO: add support for restricted canonical addresses
     private long getSingleAddressId(String address) {
         boolean isEmail = Mms.isEmailAddress(address);
         boolean isPhoneNumber = Mms.isPhoneNumber(address);
@@ -969,12 +968,12 @@ public class MmsSmsProvider extends ContentProvider {
             final String[] projection = new String[] {ThreadsColumns._ID};
             final SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
             qb.setTables(TABLE_THREADS);
-            qb.appendWhereStandalone(ThreadsColumns.RECIPIENT_IDS + "=" + recipientIds);
+            qb.appendWhereStandalone(ThreadsColumns.RECIPIENT_IDS + " = ?");
             if (!canReadRestrictedMessages) {
                 ReadRestriction.appendReadRestrictionToQuery(qb, TABLE_THREADS,
                     canReadRestrictedMessages);
             }
-            return qb.query(db, projection, null, null, null, null, null);
+            return qb.query(db, projection, null, new String[] { recipientIds }, null, null, null);
         } else {
             return db.rawQuery(THREAD_QUERY, new String[] { recipientIds });
         }
@@ -985,12 +984,12 @@ public class MmsSmsProvider extends ContentProvider {
      * recipients IDs.  If no thread exists with this ID, create
      * one and return it.  Callers should always use
      * Threads.getThreadId to access this information.
-     *
-     * @throws UnsupportedOperationException if the caller does not have permission to read
-     * restricted messages and the thread is restricted.
      */
     private synchronized Cursor getThreadId(List<String> recipients,
             boolean canReadRestrictedMessages) {
+        // Read restriction does not need to be enforced when assembling addresses for a thread.
+        // This method already verifies if the caller has the permission to create a new thread and
+        // new canonical addresses will be created as restricted by default.
         Set<Long> addressIds = getAddressIds(recipients);
         String recipientIds = "";
 
