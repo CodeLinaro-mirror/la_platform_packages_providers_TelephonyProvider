@@ -60,6 +60,7 @@ import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Threads;
 import android.telephony.PhoneNumberUtils;
+import android.telephony.MessageUpgradeController;
 import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
 import android.telephony.SubscriptionManager;
@@ -98,6 +99,7 @@ import com.android.internal.telephony.cdma.sms.UserData;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 public class SmsProvider extends ContentProvider {
     /* No response constant from SmsResponse */
@@ -242,6 +244,23 @@ public class SmsProvider extends ContentProvider {
     private final Executor mBackgroundExecutor = Executors.newSingleThreadExecutor();
 
     private final Handler mMainThreadHandler = new Handler(Looper.getMainLooper());
+
+    // TODO: jferec - Remove this once the MessageUpgradeController is a singleton.
+    // Lazy initialization for testing setup that omits #onCreate() invocation.
+    private final Supplier<MessageUpgradeController> mMessageUpgradeControllerSupplier =
+        new Supplier<MessageUpgradeController>() {
+            private MessageUpgradeController mMessageUpgradeController = null;
+
+            @Override
+            public MessageUpgradeController get() {
+                synchronized (this) {
+                    if (mMessageUpgradeController == null) {
+                        mMessageUpgradeController = new MessageUpgradeController(getContext());
+                    }
+                    return mMessageUpgradeController;
+                }
+            }
+        };
 
     @VisibleForTesting
     protected TextClassifier mTextClassifier;
@@ -1110,10 +1129,8 @@ public class SmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final int readRestrictionValue =
-                    ReadRestriction.computeReadRestrictionValueOnInsert(values,
-                        canWriteRestrictedMessages);
-                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME, readRestrictionValue);
+                ReadRestriction.setReadRestrictionValueOnInsert(values,
+                    mMessageUpgradeControllerSupplier.get(), callerPkg, canWriteRestrictedMessages);
             }
 
             // thread_id
@@ -2097,13 +2114,7 @@ public class SmsProvider extends ContentProvider {
         if (Flags.secureAccessToRestrictedRcsMessages()) {
             final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-            final Integer readRestrictionValue
-                = ReadRestriction.computeReadRestrictionValueOnUpdate(values,
-                        canWriteRestrictedMessages);
-            if (readRestrictionValue != null) {
-                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME,
-                        readRestrictionValue);
-            }
+            ReadRestriction.setReadRestrictionValueOnUpdate(values, canWriteRestrictedMessages);
         }
 
         final long token = Binder.clearCallingIdentity();
