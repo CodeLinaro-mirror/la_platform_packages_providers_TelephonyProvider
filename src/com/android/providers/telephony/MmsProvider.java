@@ -52,6 +52,7 @@ import android.provider.Telephony.ReadRestriction.ReadRestrictionValues;
 import android.support.v4.content.FileProvider;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.telephony.MessageUpgradeController;
 import android.telephony.SmsManager;
 import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
@@ -79,6 +80,7 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * The class to provide base facility to access MMS related content,
@@ -177,6 +179,23 @@ public class MmsProvider extends ContentProvider {
     public void setProviderUtilWrapper(ProviderUtilWrapper providerUtilWrapper) {
         this.providerUtilWrapper = providerUtilWrapper;
     }
+
+    // TODO: Remove this once the MessageUpgradeController is a singleton.
+    // Lazy initialization for testing setup that omits #onCreate() invocation.
+    private final Supplier<MessageUpgradeController> mMessageUpgradeControllerSupplier =
+        new Supplier<MessageUpgradeController>() {
+            private MessageUpgradeController mMessageUpgradeController = null;
+
+            @Override
+            public MessageUpgradeController get() {
+                synchronized (this) {
+                    if (mMessageUpgradeController == null) {
+                        mMessageUpgradeController = new MessageUpgradeController(getContext());
+                    }
+                    return mMessageUpgradeController;
+                }
+            }
+        };
 
     @Override
     public boolean onCreate() {
@@ -905,10 +924,9 @@ public class MmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final int readRestrictionValue =
-                    ReadRestriction.computeReadRestrictionValueOnInsert(finalValues,
+                ReadRestriction.setReadRestrictionValueOnInsert(finalValues,
+                        mMessageUpgradeControllerSupplier.get(), callerPkg,
                         canWriteRestrictedMessages);
-                finalValues.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME, readRestrictionValue);
             }
 
             long timeInMillis = System.currentTimeMillis();
@@ -1516,13 +1534,8 @@ public class MmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final Integer readRestrictionValue
-                    = ReadRestriction.computeReadRestrictionValueOnUpdate(finalValues,
-                            canWriteRestrictedMessages);
-                if (readRestrictionValue != null) {
-                    finalValues.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME,
-                            readRestrictionValue);
-                }
+                ReadRestriction.setReadRestrictionValueOnUpdate(finalValues,
+                        canWriteRestrictedMessages);
             }
 
             if (msgId != null) {
