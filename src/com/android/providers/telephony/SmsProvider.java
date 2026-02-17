@@ -27,6 +27,7 @@ import android.annotation.NonNull;
 import android.annotation.RequiresPermission;
 import android.annotation.SuppressLint;
 import android.app.AppOpsManager;
+import android.app.compat.CompatChanges;
 import android.content.BroadcastReceiver;
 import android.content.ContentProvider;
 import android.content.ContentResolver;
@@ -53,6 +54,8 @@ import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
 import android.provider.Telephony;
+import android.provider.Telephony.ReadRestriction;
+import android.provider.Telephony.ReadRestriction.ReadRestrictionValues;
 import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Threads;
@@ -109,7 +112,55 @@ public class SmsProvider extends ContentProvider {
     static final String TABLE_CANONICAL_ADDRESSES = "canonical_addresses";
     static final String TABLE_SR_PENDING = "sr_pending";
     private static final String TABLE_WORDS = "words";
+    /**
+     * This view is a proxy for reading from the {@link #TABLE_SMS} table. It contains all the rows
+     * in the {@link #TABLE_SMS} table.
+     *
+     * View is used here to enforce a uniform projection of columns across all queries:
+     *  - {@link Sms#READ_RESTRICTION} is hidden from the selection.
+     *  - {@link ReadRestriction#RESTRICTED} bit is extracted from the {@link Sms#READ_RESTRICTION}
+     * column and exposed as a boolean (integer) field.
+     */
+    static final String VIEW_SMS_ALL = "sms_all";
+
+    /**
+     * This view is a proxy for reading from the {@link #TABLE_SMS} table.
+     *
+     * In comparison to the {@link #VIEW_SMS_ALL}, it is a restricted view which only contains sent
+     * or received messages, without drafts.
+     */
     static final String VIEW_SMS_RESTRICTED = "sms_restricted";
+    /**
+     * This is the list of columns in the {@link #TABLE_SMS} that are exposed in the queries via
+     * {@link #VIEW_SMS_ALL} or {@link #VIEW_SMS_RESTRICTED}. {@link #TABLE_SMS} should not
+     * be queried directly.
+     */
+    static final String[] SMS_SELECTION_COLUMNS = new String[] {
+        Sms._ID,
+        Sms.THREAD_ID,
+        Sms.ADDRESS,
+        Sms.PERSON,
+        Sms.DATE,
+        Sms.DATE_SENT,
+        Sms.PROTOCOL,
+        Sms.READ,
+        Sms.STATUS,
+        Sms.TYPE,
+        Sms.REPLY_PATH_PRESENT,
+        Sms.SUBJECT,
+        Sms.BODY,
+        Sms.SERVICE_CENTER,
+        Sms.LOCKED,
+        Sms.SUBSCRIPTION_ID,
+        Sms.ERROR_CODE,
+        Sms.CREATOR,
+        Sms.SEEN,
+        Sms.CONTAINS_OTP,
+        Sms.TRANSACTION_ID,
+        "CAST(CASE WHEN (" + Sms.READ_RESTRICTION + " & " +
+                 ReadRestriction.ReadRestrictionValues.READ_RESTRICTION_RESTRICTED +
+                 ") <> 0 THEN 1 ELSE 0 END AS INTEGER) AS restricted",
+    };
 
     private static final int DELETE_SUCCESS = 1;
     private static final int DELETE_FAIL = 0;
@@ -229,6 +280,9 @@ public class SmsProvider extends ContentProvider {
      * @return the table/view name of the "sms" data
      */
     public static String getSmsTable(boolean accessRestricted) {
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            return accessRestricted ? VIEW_SMS_RESTRICTED : VIEW_SMS_ALL;
+        }
         return accessRestricted ? VIEW_SMS_RESTRICTED : TABLE_SMS;
     }
 
@@ -259,6 +313,14 @@ public class SmsProvider extends ContentProvider {
             }
         }
 
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            SqlQueryChecker.checkQueryForForbiddenColumns(projectionIn, selection, sort, TAG);
+        }
+
+        final boolean canReadRestrictedMessages = ProviderUtil.canReadRestrictedMessages(
+                getContext(), getCallingPackage(), callingUid);
+        Log.v(TAG, "canReadRestrictedMessages=" + canReadRestrictedMessages);
+
         try {
             SqlQueryChecker.checkSelection(selection);
         } catch (IllegalArgumentException e) {
@@ -279,40 +341,46 @@ public class SmsProvider extends ContentProvider {
         }
         switch (match) {
             case SMS_ALL:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_ALL, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_ALL, smsTable, canReadRestrictedMessages);
                 break;
 
             case SMS_UNDELIVERED:
-                constructQueryForUndelivered(qb, smsTable);
+                constructQueryForUndelivered(qb, smsTable, canReadRestrictedMessages);
                 break;
 
             case SMS_FAILED:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_FAILED, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_FAILED, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_QUEUED:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_QUEUED, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_QUEUED, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_INBOX:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_INBOX, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_INBOX, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_SENT:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_SENT, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_SENT, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_DRAFT:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_DRAFT, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_DRAFT, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_OUTBOX:
-                constructQueryForBox(qb, Sms.MESSAGE_TYPE_OUTBOX, smsTable);
+                constructQueryForBox(qb, Sms.MESSAGE_TYPE_OUTBOX, smsTable,
+                        canReadRestrictedMessages);
                 break;
 
             case SMS_ALL_ID:
-                qb.setTables(smsTable);
-                qb.appendWhere("(_id = " + url.getPathSegments().get(0) + ")");
+                constructQueryForAllSms(qb, smsTable, canReadRestrictedMessages);
+                appendWhere(qb, "(_id = " + url.getPathSegments().get(0) + ")");
                 break;
 
             case SMS_INBOX_ID:
@@ -320,8 +388,8 @@ public class SmsProvider extends ContentProvider {
             case SMS_SENT_ID:
             case SMS_DRAFT_ID:
             case SMS_OUTBOX_ID:
-                qb.setTables(smsTable);
-                qb.appendWhere("(_id = " + url.getPathSegments().get(1) + ")");
+                constructQueryForAllSms(qb, smsTable, canReadRestrictedMessages);;
+                appendWhere(qb, "(_id = " + url.getPathSegments().get(1) + ")");
                 break;
 
             case SMS_CONVERSATIONS_ID:
@@ -341,7 +409,7 @@ public class SmsProvider extends ContentProvider {
                 }
 
                 qb.setTables(smsTable);
-                qb.appendWhere("thread_id = " + threadID);
+                appendWhere(qb, "thread_id = " + threadID);
                 break;
 
             case SMS_CONVERSATIONS:
@@ -351,7 +419,7 @@ public class SmsProvider extends ContentProvider {
                         + "COUNT(*) AS msg_count "
                         + "FROM " + smsTable + " "
                         + "GROUP BY thread_id) AS groups");
-                qb.appendWhere(smsTable + ".thread_id=groups.group_thread_id"
+                appendWhere(qb, smsTable + ".thread_id=groups.group_thread_id"
                         + " AND " + smsTable + ".date=groups.group_date");
                 final HashMap<String, String> projectionMap = new HashMap<>();
                 projectionMap.put(Sms.Conversations.SNIPPET,
@@ -362,6 +430,7 @@ public class SmsProvider extends ContentProvider {
                         "groups.msg_count AS msg_count");
                 projectionMap.put("delta", null);
                 qb.setProjectionMap(projectionMap);
+                ReadRestriction.appendRestrictedToQuery(qb, smsTable, canReadRestrictedMessages);
                 break;
 
             case SMS_RAW_MESSAGE:
@@ -379,25 +448,24 @@ public class SmsProvider extends ContentProvider {
                 break;
 
             case SMS_ATTACHMENT:
-                qb.setTables("attachments");
+                constructQueryForAttachments(qb, smsTable, canReadRestrictedMessages);
                 break;
 
             case SMS_ATTACHMENT_ID:
-                qb.setTables("attachments");
-                qb.appendWhere(
-                        "(sms_id = " + url.getPathSegments().get(1) + ")");
+                constructQueryForAttachments(qb, smsTable, canReadRestrictedMessages);
+                appendWhere(qb, "(sms_id = " + url.getPathSegments().get(1) + ")");
                 break;
 
             case SMS_QUERY_THREAD_ID:
-                qb.setTables("canonical_addresses");
+                constructQueryForCanonicalAddresses(qb, canReadRestrictedMessages);
                 if (projectionIn == null) {
                     projectionIn = sIDProjection;
                 }
                 break;
 
             case SMS_STATUS_ID:
-                qb.setTables(smsTable);
-                qb.appendWhere("(_id = " + url.getPathSegments().get(1) + ")");
+                constructQueryForAllSms(qb, smsTable, canReadRestrictedMessages);
+                appendWhere(qb, "(_id = " + url.getPathSegments().get(1) + ")");
                 break;
 
             case SMS_ALL_ICC:
@@ -480,7 +548,7 @@ public class SmsProvider extends ContentProvider {
         try {
             // Filter SMS based on subId and emergency numbers.
             selectionBySubIds = ProviderUtil.getSelectionBySubIds(getContext(),
-                    callerUserHandle);
+                    callerUserHandle, getFirstTableName(qb));
             if (hasCalling() && qb.getTables().equals(smsTable)) {
                 selectionByEmergencyNumbers = ProviderUtil
                         .getSelectionByEmergencyNumbers(getContext());
@@ -533,14 +601,21 @@ public class SmsProvider extends ContentProvider {
                 long pendingOtpCutoff = startOfCurrentSecondInMs - OTP_CLASSIFICATION_TIMEOUT_MS;
                 @SuppressLint("DefaultLocale")
                 final StringBuilder where = new StringBuilder(String.format(
-                        "%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
-                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
-                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff));
+                        " %s OR %s < %d OR (%s AND %s < %d)",
+                        getContainsOtpSqlFilter(Sms.OTP_TYPE_NONE), Sms.DATE, otpCutoff,
+                        getContainsOtpSqlFilter(Sms.OTP_TYPE_PENDING), Sms.DATE, pendingOtpCutoff));
                 final String hash = PackageBasedTokenUtil.generatePackageBasedToken(
                         getContext().getPackageManager(), callingPackage, callerUserHandle);
                 if (hash != null) {
                     where.append(String.format(" OR (%s LIKE '%%%s%%')",
                             Sms.BODY, hash));
+                }
+                // Note: For backwards compatibility, we allow packages with
+                // targetSdk < CINNAMON_BUN to read generic OTP messages.
+                if (android.view.flags.Flags.redactOtpAppCompatApi()
+                        && !CompatChanges.isChangeEnabled(SmsManager.FILTER_GENERIC_OTP,
+                                callingPackage, Binder.getCallingUserHandle())) {
+                  where.append(String.format(" OR %s", getContainsGenericOtpSqlFilter()));
                 }
                 qb.appendWhereStandalone(where.toString());
             }
@@ -554,6 +629,31 @@ public class SmsProvider extends ContentProvider {
         } finally {
             Trace.endSection();
         }
+    }
+
+    private String getContainsOtpSqlFilter(int containsOtpType) {
+        if (android.view.flags.Flags.redactOtpAppCompatApi()) {
+            return String.format("((%s & %d) = %d)",
+                   Telephony.Sms.CONTAINS_OTP, Telephony.Sms.OTP_TYPE_MASK, containsOtpType);
+        }
+        return String.format("(%s = %d)", Telephony.Sms.CONTAINS_OTP, containsOtpType);
+    }
+
+    private String getContainsGenericOtpSqlFilter() {
+        // Generic OTP is an OTP that does not follow standards defined by either
+        // SMS Hash Retriever standards or Web OTP standards.
+        return String.format("((%s & %s) = %s)",
+               Telephony.Sms.CONTAINS_OTP,
+               Telephony.Sms.OTP_SUBTYPE_MASK | Telephony.Sms.OTP_TYPE_MASK,
+               Telephony.Sms.OTP_SUBTYPE_NONE | Telephony.Sms.OTP_TYPE_CONTAINS_OTP);
+    }
+
+    /**
+     * Returns the first table name in the query. This is used to disambiguate the sub_id column
+     * name when two tables are joined.
+     */
+    private static String getFirstTableName(SQLiteQueryBuilder qb) {
+        return qb.getTables().split("[, ]+")[0];
     }
 
     protected boolean canReadRawTable(int uid, String packageName) {
@@ -570,6 +670,14 @@ public class SmsProvider extends ContentProvider {
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
             Log.d(TAG, "purgeDeletedMessagesInRawTable: num rows older than " + oldTimestamp +
                     " purged: " + num);
+        }
+    }
+
+    private static void appendWhere(SQLiteQueryBuilder qb, String where) {
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            qb.appendWhereStandalone(where);
+        } else {
+            qb.appendWhere(where);
         }
     }
 
@@ -713,20 +821,64 @@ public class SmsProvider extends ContentProvider {
         return cursor;
     }
 
-    private void constructQueryForBox(SQLiteQueryBuilder qb, int type, String smsTable) {
-        qb.setTables(smsTable);
+    private void constructQueryForBox(SQLiteQueryBuilder qb, int type, String smsTable,
+        boolean canReadRestrictedMessages) {
+        constructQueryForAllSms(qb, smsTable, canReadRestrictedMessages);
 
         if (type != Sms.MESSAGE_TYPE_ALL) {
-            qb.appendWhere("type=" + type);
+            appendWhere(qb, "type=" + type);
         }
     }
 
-    private void constructQueryForUndelivered(SQLiteQueryBuilder qb, String smsTable) {
-        qb.setTables(smsTable);
+    private void constructQueryForUndelivered(SQLiteQueryBuilder qb, String smsTable,
+        boolean canReadRestrictedMessages) {
+        constructQueryForAllSms(qb, smsTable, canReadRestrictedMessages);
 
-        qb.appendWhere("(type=" + Sms.MESSAGE_TYPE_OUTBOX +
+        appendWhere(qb, "(type=" + Sms.MESSAGE_TYPE_OUTBOX +
                        " OR type=" + Sms.MESSAGE_TYPE_FAILED +
                        " OR type=" + Sms.MESSAGE_TYPE_QUEUED + ")");
+    }
+
+    /**
+     * Constructs a query for all rows in the sms table. Join with the pdu table to get the read
+     * restriction column value.
+     *
+     * @param qb The SQLiteQueryBuilder to construct the query with.
+     * @param canReadRestrictedMessages Whether the caller can read restricted messages.
+     */
+    private void constructQueryForAllSms(SQLiteQueryBuilder qb, String smsTable,
+        boolean canReadRestrictedMessages) {
+        qb.setTables(smsTable);
+        ReadRestriction.appendRestrictedToQuery(qb, null, canReadRestrictedMessages);
+    }
+
+    /**
+     * Constructs a query for the attachments table. Join with the sms table to get the read
+     * restriction column value.
+     *
+     * @param qb The SQLiteQueryBuilder to construct the query with.
+     * @param smsTable The sms table to join with.
+     * @param canReadRestrictedMessages Whether the caller can read restricted messages.
+     */
+    private void constructQueryForAttachments(SQLiteQueryBuilder qb, String smsTable,
+        boolean canReadRestrictedMessages) {
+        qb.setTables(TABLE_ATTACHMENTS);
+        String joinAssignmentClause = smsTable + "._id=" + TABLE_ATTACHMENTS + ".sms_id";
+        ReadRestriction.appendRestrictedToQuery(qb, joinAssignmentClause, smsTable,
+            canReadRestrictedMessages);
+    }
+
+    /**
+     * Constructs a query for the canonical addresses table.
+     *
+     * @param qb The SQLiteQueryBuilder to construct the query with.
+     * @param canReadRestrictedMessages Whether the caller can read restricted messages.
+     */
+    private void constructQueryForCanonicalAddresses(SQLiteQueryBuilder qb,
+        boolean canReadRestrictedMessages) {
+        qb.setTables(TABLE_CANONICAL_ADDRESSES);
+        ReadRestriction.appendReadRestrictionToQuery(qb, TABLE_CANONICAL_ADDRESSES,
+            canReadRestrictedMessages);
     }
 
     @Override
@@ -953,6 +1105,15 @@ public class SmsProvider extends ContentProvider {
 
             if (addType && (type != Sms.MESSAGE_TYPE_ALL)) {
                 values.put(Sms.TYPE, Integer.valueOf(type));
+            }
+
+            if (Flags.secureAccessToRestrictedRcsMessages()) {
+                final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
+                        getContext(), callerPkg, callerUid);
+                final int readRestrictionValue =
+                    ReadRestriction.computeReadRestrictionValueOnInsert(values,
+                        canWriteRestrictedMessages);
+                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME, readRestrictionValue);
             }
 
             // thread_id
@@ -1467,27 +1628,48 @@ public class SmsProvider extends ContentProvider {
 
                 TextLinks links = mTextClassifier.generateLinks(request);
 
+                final boolean appCompatApiEnabled =
+                        android.view.flags.Flags.redactOtpAppCompatApi();
+                final boolean webOtpApiEnabled =
+                        android.view.flags.Flags.redactWebOtpSmsApi();
                 int otpType = Sms.OTP_TYPE_NONE;
                 for (TextLinks.TextLink link : links.getLinks()) {
                     for (int i = 0; i < link.getEntityCount(); i++) {
-                        if (link.getEntity(i).equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)
-                            || (android.view.flags.Flags.redactWebOtpSmsApi()
-                                  && link.getEntity(i).equals(TextClassifier.TYPE_SMS_WEB_OTP))
-                            || (android.view.flags.Flags.redactOtpAppCompatApi()
-                                  && link.getEntity(i).equals(TextClassifier.TYPE_OTP))) {
-                            otpType = Sms.OTP_TYPE_CONTAINS_OTP;
-                            break;
+                        final String entity = link.getEntity(i);
+
+                        boolean isOtp = false;
+                        // The sub-type distinguishes different type of OTP message.
+                        // E.g. SMS Retriever OTP, Web OTP, or a generic OTP.
+                        // Note that this represents bitfields of `otpType`.
+                        // Please refer to Sms.OTP_SUBTYPE_* definitions for more details.
+                        int subType = 0;
+                        if (entity.equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)) {
+                            isOtp = true;
+                            subType = Sms.OTP_SUBTYPE_SMS_RETRIEVER_OTP;
+                        } else if (webOtpApiEnabled
+                                      && entity.equals(TextClassifier.TYPE_SMS_WEB_OTP)) {
+                            isOtp = true;
+                            subType = Sms.OTP_SUBTYPE_WEB_OTP;
+                        } else if (appCompatApiEnabled
+                                      && entity.equals(TextClassifier.TYPE_OTP)) {
+                            isOtp = true;
+                            subType = Sms.OTP_SUBTYPE_NONE;
                         }
-                    }
-                    if (otpType != Sms.OTP_TYPE_NONE) {
-                        break;
+
+                        if (isOtp) {
+                            otpType |= Sms.OTP_TYPE_CONTAINS_OTP;
+                            if (appCompatApiEnabled) {
+                                // If Redact OTP App Compat API is enabled, add the subtype.
+                                otpType |= subType;
+                            }
+                        }
                     }
                 }
                 ContentValues values = new ContentValues();
                 values.put(Sms.CONTAINS_OTP, otpType);
                 updateWithRetry(uri, values, "scheduleOtpCheck", 1);
 
-                if (otpType == Sms.OTP_TYPE_CONTAINS_OTP) {
+                if ((otpType & Telephony.Sms.OTP_TYPE_MASK) == Sms.OTP_TYPE_CONTAINS_OTP) {
                     // Schedule an update for when the OTP hiding time expires, to remove the "has
                     // otp" value. This is best-effort, not guaranteed.
                     mMainThreadHandler.postDelayed(() -> {
@@ -1573,13 +1755,19 @@ public class SmsProvider extends ContentProvider {
         try {
             // Filter SMS based on subId and emergency numbers.
             selectionBySubIds = ProviderUtil.getSelectionBySubIds(getContext(),
-                    callerUserHandle);
+                    callerUserHandle, TABLE_SMS);
             if (hasCalling()) {
                 selectionByEmergencyNumbers = ProviderUtil
                         .getSelectionByEmergencyNumbers(getContext());
             }
         } finally {
             Binder.restoreCallingIdentity(token);
+        }
+
+        // The delete operation is already restricted to WRITE_SMS permission, so we don't need
+        // further restriction for deleting restricted messages.
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
         }
 
         String filter = "";
@@ -1837,6 +2025,9 @@ public class SmsProvider extends ContentProvider {
             ((MmsSmsDatabaseHelper) sqLiteOpenHelper).addDatabaseOpeningDebugLog(
                     callerPkg + ";SmsProvider.update;" + url, false);
         }
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
+        }
         if (callerUid != Process.myUid() && values.containsKey(Telephony.Sms.CONTAINS_OTP)) {
             // Apps are not allowed to update the CONTAINS_OTP column directly
             values.remove(Telephony.Sms.CONTAINS_OTP);
@@ -1903,13 +2094,25 @@ public class SmsProvider extends ContentProvider {
             values.remove(Sms.CREATOR);
         }
 
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
+            final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
+                        getContext(), callerPkg, callerUid);
+            final Integer readRestrictionValue
+                = ReadRestriction.computeReadRestrictionValueOnUpdate(values,
+                        canWriteRestrictedMessages);
+            if (readRestrictionValue != null) {
+                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME,
+                        readRestrictionValue);
+            }
+        }
+
         final long token = Binder.clearCallingIdentity();
         String selectionBySubIds = null;
         String selectionByEmergencyNumbers = null;
         try {
             // Filter SMS based on subId and emergency numbers.
             selectionBySubIds = ProviderUtil.getSelectionBySubIds(getContext(),
-                    callerUserHandle);
+                    callerUserHandle, table);
             if (table.equals(TABLE_SMS)) {
                 selectionByEmergencyNumbers = ProviderUtil
                         .getSelectionByEmergencyNumbers(getContext());
@@ -2116,7 +2319,7 @@ public class SmsProvider extends ContentProvider {
         try {
             // Filter SMS based on subId.
             selectionBySubIds = ProviderUtil.getSelectionBySubIds(getContext(),
-                    userToBeRemoved);
+                    userToBeRemoved, TABLE_SMS);
         } finally {
             Binder.restoreCallingIdentity(token);
         }
