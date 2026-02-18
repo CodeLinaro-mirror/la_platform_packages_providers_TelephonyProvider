@@ -112,6 +112,7 @@ public class SmsProvider extends ContentProvider {
     static final String TABLE_CANONICAL_ADDRESSES = "canonical_addresses";
     static final String TABLE_SR_PENDING = "sr_pending";
     private static final String TABLE_WORDS = "words";
+    private static final String SMS_PRIORITY = "priority";
     /**
      * This view is a proxy for reading from the {@link #TABLE_SMS} table. It contains all the rows
      * in the {@link #TABLE_SMS} table.
@@ -152,6 +153,7 @@ public class SmsProvider extends ContentProvider {
         Sms.SERVICE_CENTER,
         Sms.LOCKED,
         Sms.SUBSCRIPTION_ID,
+        SMS_PRIORITY,
         Sms.ERROR_CODE,
         Sms.CREATOR,
         Sms.SEEN,
