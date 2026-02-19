@@ -1266,6 +1266,7 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
             "service_center TEXT," +
             "locked INTEGER DEFAULT 0," +
             "sub_id INTEGER DEFAULT " + SubscriptionManager.INVALID_SUBSCRIPTION_ID + ", " +
+            "priority INTEGER DEFAULT -1," +
             "error_code INTEGER DEFAULT " + NO_ERROR_CODE + ", " +
             "creator TEXT," +
             "seen INTEGER DEFAULT 0," +
