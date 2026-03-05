@@ -60,6 +60,7 @@ import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Threads;
 import android.telephony.PhoneNumberUtils;
+import android.telephony.MessageUpgradeController;
 import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
 import android.telephony.SubscriptionManager;
@@ -1112,10 +1113,8 @@ public class SmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final int readRestrictionValue =
-                    ReadRestriction.computeReadRestrictionValueOnInsert(values,
+                ReadRestriction.setReadRestrictionValueOnInsert(getContext(), values, callerPkg,
                         canWriteRestrictedMessages);
-                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME, readRestrictionValue);
             }
 
             // thread_id
@@ -2099,13 +2098,7 @@ public class SmsProvider extends ContentProvider {
         if (Flags.secureAccessToRestrictedRcsMessages()) {
             final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-            final Integer readRestrictionValue
-                = ReadRestriction.computeReadRestrictionValueOnUpdate(values,
-                        canWriteRestrictedMessages);
-            if (readRestrictionValue != null) {
-                values.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME,
-                        readRestrictionValue);
-            }
+            ReadRestriction.setReadRestrictionValueOnUpdate(values, canWriteRestrictedMessages);
         }
 
         final long token = Binder.clearCallingIdentity();

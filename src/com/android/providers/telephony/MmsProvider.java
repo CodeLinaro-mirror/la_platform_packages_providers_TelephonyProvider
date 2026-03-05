@@ -905,10 +905,8 @@ public class MmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final int readRestrictionValue =
-                    ReadRestriction.computeReadRestrictionValueOnInsert(finalValues,
-                        canWriteRestrictedMessages);
-                finalValues.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME, readRestrictionValue);
+                ReadRestriction.setReadRestrictionValueOnInsert(getContext(), finalValues,
+                        callerPkg, canWriteRestrictedMessages);
             }
 
             long timeInMillis = System.currentTimeMillis();
@@ -1516,13 +1514,8 @@ public class MmsProvider extends ContentProvider {
             if (Flags.secureAccessToRestrictedRcsMessages()) {
                 final boolean canWriteRestrictedMessages = ProviderUtil.canWriteRestrictedMessages(
                         getContext(), callerPkg, callerUid);
-                final Integer readRestrictionValue
-                    = ReadRestriction.computeReadRestrictionValueOnUpdate(finalValues,
-                            canWriteRestrictedMessages);
-                if (readRestrictionValue != null) {
-                    finalValues.put(ReadRestriction.READ_RESTRICTION_COLUMN_NAME,
-                            readRestrictionValue);
-                }
+                ReadRestriction.setReadRestrictionValueOnUpdate(finalValues,
+                        canWriteRestrictedMessages);
             }
 
             if (msgId != null) {
