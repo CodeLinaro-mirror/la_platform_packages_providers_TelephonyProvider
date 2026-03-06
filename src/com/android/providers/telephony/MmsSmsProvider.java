@@ -456,8 +456,7 @@ public class MmsSmsProvider extends ContentProvider {
                         }
                     }
                     cursor = getSimpleConversations(
-                            projection, selection, selectionArgs, sortOrder,
-                            canReadRestrictedMessages);
+                            projection, selection, selectionArgs, canReadRestrictedMessages);
                 } else {
                     if (selectionBySubIds == null) {
                         // No subscriptions associated with user, return empty cursor.
@@ -1104,7 +1103,7 @@ public class MmsSmsProvider extends ContentProvider {
      * Return existing threads in the database.
      */
     private Cursor getSimpleConversations(String[] projection, String selection,
-            String[] selectionArgs, String sortOrder, boolean canReadRestrictedMessages) {
+            String[] selectionArgs, boolean canReadRestrictedMessages) {
         if(Flags.secureAccessToRestrictedRcsMessages()) {
             final SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
             qb.setTables(TABLE_THREADS);
@@ -1113,7 +1112,7 @@ public class MmsSmsProvider extends ContentProvider {
                         canReadRestrictedMessages);
             }
             return qb.query(mOpenHelper.getReadableDatabase(), projection, selection, selectionArgs,
-                    null, null, sortOrder);
+                    null, null, " date DESC");
         }
         return mOpenHelper.getReadableDatabase().query(TABLE_THREADS, projection,
                 selection, selectionArgs, null, null, " date DESC");
