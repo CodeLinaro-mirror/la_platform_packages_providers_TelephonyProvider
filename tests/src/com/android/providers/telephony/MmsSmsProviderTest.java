@@ -90,12 +90,7 @@ public class MmsSmsProviderTest {
         assumeTrue("Device does not support FEATURE_TELEPHONY_MESSAGING, skipping test",
                 hasTelephonyMessaging);
 
-        mMmsSmsProvider = new MmsSmsProvider() {
-            @Override
-            protected boolean canReadOtpSms(int callerUid, String callingPackage) {
-                return true;
-            }
-        };
+        mMmsSmsProvider = new MmsSmsProvider();
         mSmsProviderTestable = new SmsProviderTestable();
 
         // Common mock setup
