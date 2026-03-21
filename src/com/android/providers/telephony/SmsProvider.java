@@ -1085,7 +1085,10 @@ public class SmsProvider extends ContentProvider {
                 // Determine if incoming messages contain an OTP code
                 String message = values.getAsString(Sms.BODY);
                 int otpType;
-                if (Telephony.Sms.shouldCheckForOtp(getContext(), message)) {
+                Long date = values.getAsLong(Sms.DATE);
+                if (date != null
+                        && date > System.currentTimeMillis() - ProviderUtil.OTP_HIDING_TIME_MS
+                        && Telephony.Sms.shouldCheckForOtp(getContext(), message)) {
                     otpType = Telephony.Sms.OTP_TYPE_PENDING;
                     possibleOtpMessage = message;
                 } else {
@@ -1711,7 +1714,8 @@ public class SmsProvider extends ContentProvider {
         // The delete operation is already restricted to WRITE_SMS permission, so we don't need
         // further restriction for deleting restricted messages.
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, where,
+                    /* sortOrder= */ null, TAG);
         }
 
         String filter = "";
@@ -1970,7 +1974,8 @@ public class SmsProvider extends ContentProvider {
                     callerPkg + ";SmsProvider.update;" + url, false);
         }
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, where,
+                    /* sortOrder= */ null, TAG);
         }
         if (callerUid != Process.myUid() && values.containsKey(Telephony.Sms.CONTAINS_OTP)) {
             // Apps are not allowed to update the CONTAINS_OTP column directly
@@ -2082,7 +2087,14 @@ public class SmsProvider extends ContentProvider {
         where = DatabaseUtils.concatenateWhere(where, filter);
 
         where = DatabaseUtils.concatenateWhere(where, extraWhere);
-        count = db.update(table, values, where, whereArgs);
+
+        if (Flags.secureAccessToRestrictedRcsMessages()
+            && values.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
+            count = ReadRestriction.performReadRestrictionDatabaseUpdate(
+                db, table, values, where, whereArgs);
+        } else {
+            count = db.update(table, values, where, whereArgs);
+        }
 
         if (count > 0) {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {

@@ -1188,7 +1188,8 @@ public class MmsProvider extends ContentProvider {
         // The delete operation is already restricted to WRITE_SMS permission, so we don't need
         // further restriction for deleting restricted messages.
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(selectionArgs, selection, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, selection,
+                    /* sortOrder= */ null, TAG);
         }
 
         String table, extraSelection = null;
@@ -1421,7 +1422,8 @@ public class MmsProvider extends ContentProvider {
             return 0;
         }
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(selectionArgs, selection, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, selection,
+                    /* sortOrder= */ null, TAG);
         }
         final int callerUid = Binder.getCallingUid();
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
@@ -1544,7 +1546,14 @@ public class MmsProvider extends ContentProvider {
             ((MmsSmsDatabaseHelper) mOpenHelper).addDatabaseOpeningDebugLog(
                     callerPkg + ";MmsProvider.update;" + uri, false);
         }
-        int count = db.update(table, finalValues, finalSelection, selectionArgs);
+        int count = 0;
+        if (Flags.secureAccessToRestrictedRcsMessages()
+            && finalValues.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
+            count = ReadRestriction.performReadRestrictionDatabaseUpdate(
+                db, table, finalValues, finalSelection, selectionArgs);
+        } else {
+            count = db.update(table, finalValues, finalSelection, selectionArgs);
+        }
         if (notify && (count > 0)) {
             // If this message was upgraded, evaluate its new status and dispatch
             // any associated PendingIntents to notify the sender.
