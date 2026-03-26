@@ -47,14 +47,11 @@ import android.telephony.SmsManager;
 import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 import android.util.Log;
-
 import com.android.internal.telephony.SmsApplication;
 import com.android.internal.telephony.TelephonyStatsLog;
 import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.util.TelephonyUtils;
-
 import com.google.android.mms.pdu.PduHeaders;
-
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.Arrays;
@@ -1555,7 +1552,8 @@ public class MmsSmsProvider extends ContentProvider {
     private Cursor getUndeliveredMessages(
             String[] projection, String selection, String[] selectionArgs,
             String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages) {
-        String[] mmsProjection = createMmsProjection(projection, pduTable);
+        String[] columns = handleNullMessageProjection(projection);
+        String[] mmsColumns = createMmsProjection(columns, pduTable);
 
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
@@ -1575,12 +1573,10 @@ public class MmsSmsProvider extends ContentProvider {
                 + " OR " + Sms.TYPE + " = " + Sms.MESSAGE_TYPE_FAILED
                 + " OR " + Sms.TYPE + " = " + Sms.MESSAGE_TYPE_QUEUED + ")");
 
-        String[] smsColumns = handleNullMessageProjection(projection);
-        String[] mmsColumns = handleNullMessageProjection(mmsProjection);
         String[] innerMmsProjection = makeProjectionWithDateAndThreadId(
                 mmsColumns, 1000);
         String[] innerSmsProjection = makeProjectionWithDateAndThreadId(
-                smsColumns, 1);
+                columns, 1);
 
         Set<String> columnsPresentInTable = new HashSet<String>(MMS_COLUMNS);
         columnsPresentInTable.add(pduTable + "._id");
@@ -1605,7 +1601,7 @@ public class MmsSmsProvider extends ContentProvider {
         outerQueryBuilder.setTables("(" + unionQuery + ")");
 
         String outerQuery = outerQueryBuilder.buildQuery(
-                smsColumns, null, null, null, sortOrder, null);
+                columns, null, null, null, sortOrder, null);
 
         return mOpenHelper.getReadableDatabase().rawQuery(outerQuery, EMPTY_STRING_ARRAY);
     }
@@ -1627,7 +1623,8 @@ public class MmsSmsProvider extends ContentProvider {
     private static String buildConversationQuery(String[] projection,
             String selection, String sortOrder, String smsTable, String pduTable,
             boolean canReadRestrictedMessages, String otpFilter) {
-        String[] mmsProjection = createMmsProjection(projection, pduTable);
+        String[] columns = handleNullMessageProjection(projection);
+        String[] mmsColumns = createMmsProjection(columns, pduTable);
 
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
@@ -1642,10 +1639,8 @@ public class MmsSmsProvider extends ContentProvider {
         ReadRestriction.appendRestrictedToQuery(smsQueryBuilder, smsTable,
                 canReadRestrictedMessages);
 
-        String[] smsColumns = handleNullMessageProjection(projection);
-        String[] mmsColumns = handleNullMessageProjection(mmsProjection);
         String[] innerMmsProjection = makeProjectionWithNormalizedDate(mmsColumns, 1000);
-        String[] innerSmsProjection = makeProjectionWithNormalizedDate(smsColumns, 1);
+        String[] innerSmsProjection = makeProjectionWithNormalizedDate(columns, 1);
 
         Set<String> columnsPresentInTable = new HashSet<String>(MMS_COLUMNS);
         columnsPresentInTable.add(pduTable + "._id");
@@ -1680,7 +1675,7 @@ public class MmsSmsProvider extends ContentProvider {
         outerQueryBuilder.setTables("(" + unionQuery + ")");
 
         return outerQueryBuilder.buildQuery(
-                smsColumns, null, null, null, sortOrder, null);
+                columns, null, null, null, sortOrder, null);
     }
 
     @Override
