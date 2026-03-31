@@ -37,6 +37,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.UriMatcher;
 import android.content.pm.PackageManager;
+import android.content.pm.verify.domain.DomainVerificationInfo;
+import android.content.pm.verify.domain.DomainVerificationManager;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
@@ -54,9 +56,8 @@ import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
 import android.provider.Telephony;
-import android.provider.Telephony.ReadRestriction;
-import android.provider.Telephony.ReadRestriction.ReadRestrictionValues;
 import android.provider.Telephony.MmsSms;
+import android.provider.Telephony.ReadRestriction;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Threads;
 import android.telephony.PhoneNumberUtils;
@@ -86,6 +87,7 @@ import com.android.internal.telephony.util.TelephonyUtils;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 
 import com.android.internal.telephony.EncodeException;
@@ -95,7 +97,6 @@ import com.android.internal.telephony.SmsHeader;
 import com.android.internal.telephony.cdma.sms.BearerData;
 import com.android.internal.telephony.cdma.sms.CdmaSmsAddress;
 import com.android.internal.telephony.cdma.sms.UserData;
-
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -113,6 +114,7 @@ public class SmsProvider extends ContentProvider {
     static final String TABLE_CANONICAL_ADDRESSES = "canonical_addresses";
     static final String TABLE_SR_PENDING = "sr_pending";
     private static final String TABLE_WORDS = "words";
+    private static final String SMS_PRIORITY = "priority";
     /**
      * This view is a proxy for reading from the {@link #TABLE_SMS} table. It contains all the rows
      * in the {@link #TABLE_SMS} table.
@@ -153,6 +155,7 @@ public class SmsProvider extends ContentProvider {
         Sms.SERVICE_CENTER,
         Sms.LOCKED,
         Sms.SUBSCRIPTION_ID,
+        SMS_PRIORITY,
         Sms.ERROR_CODE,
         Sms.CREATOR,
         Sms.SEEN,
@@ -169,6 +172,7 @@ public class SmsProvider extends ContentProvider {
     private static final int SLOT1 = 0;
     private static final int SLOT2 = 1;
     private static final Integer ONE = Integer.valueOf(1);
+    private static final int MAX_ALLOWED_VERIFIED_DOMAINS = 5;
     private static final int OFFSET_ADDRESS_LENGTH = 0;
     private static final int OFFSET_TOA = 1;
     private static final int OFFSET_ADDRESS_VALUE = 2;
@@ -618,6 +622,11 @@ public class SmsProvider extends ContentProvider {
                                 callingPackage, Binder.getCallingUserHandle())) {
                   where.append(String.format(" OR %s", getContainsGenericOtpSqlFilter()));
                 }
+                // Note: For backwards compatibility, we allow read access to verified owners of
+                // the domain found in Web OTPs.
+                if (android.view.flags.Flags.redactWebOtpSmsApi()) {
+                    where.append(getVerifiedDomainSql(callingPackage));
+                }
                 qb.appendWhereStandalone(where.toString());
             }
 
@@ -647,6 +656,60 @@ public class SmsProvider extends ContentProvider {
                Telephony.Sms.CONTAINS_OTP,
                Telephony.Sms.OTP_SUBTYPE_MASK | Telephony.Sms.OTP_TYPE_MASK,
                Telephony.Sms.OTP_SUBTYPE_NONE | Telephony.Sms.OTP_TYPE_CONTAINS_OTP);
+    }
+
+    // Returns SQL string to be appended to the where clause of the main query which will match
+    // Web OTP rows containing a verified domain owned by `callingPackageName`.
+    // Returns an empty string if the package has no verified domains, or if an exception is
+    // encountered.
+    private String getVerifiedDomainSql(String callingPackageName) {
+        try {
+            DomainVerificationManager domainVerificationManager =
+                    getContext().getSystemService(DomainVerificationManager.class);
+            DomainVerificationInfo domainVerificationInfo =
+                    domainVerificationManager.getDomainVerificationInfo(callingPackageName);
+            if (domainVerificationInfo != null
+                    && !domainVerificationInfo.getHostToStateMap().isEmpty()) {
+                StringBuilder verifiedDomainSql = new StringBuilder();
+                for (Map.Entry<String, Integer> hostToVerificationState :
+                        domainVerificationInfo.getHostToStateMap().entrySet()) {
+                    String domain = hostToVerificationState.getKey();
+                    Integer verificationState = hostToVerificationState.getValue();
+                    boolean isDomainVerified =
+                          verificationState == DomainVerificationInfo.STATE_MODIFIABLE_VERIFIED
+                          || verificationState == DomainVerificationInfo.STATE_SUCCESS;
+                    // To avoid performance issue and potential abuse, we currently set a hard-limit
+                    // to the number of verified domains allowed.
+                    if (isDomainVerified && verifiedDomainSql.length()
+                            < MAX_ALLOWED_VERIFIED_DOMAINS) {
+                        // Match a "@<domain> #" substring.
+                        String containsDomainSql = String.format(
+                            "(%s LIKE '%%@%s #%%')", Sms.BODY, domain);
+                        if (verifiedDomainSql.length() != 0) {
+                            verifiedDomainSql.append(" OR ");
+                        }
+                        verifiedDomainSql.append(containsDomainSql);
+                    }
+                }
+                if (verifiedDomainSql.length() != 0) {
+                    // Roughly translates to the following query:
+                    // "OR ((contains_otp & 0xFFFF) = <bitmask for WEB OTP>"
+                    // "AND (body LIKE '%@<domain1> #%' OR body LIKE '%@<domain2> #%' OR ...)"
+                    return String.format(" OR ((%s & %s) = %s AND (%s))",
+                        Telephony.Sms.CONTAINS_OTP,
+                        Telephony.Sms.OTP_SUBTYPE_MASK | Telephony.Sms.OTP_TYPE_MASK,
+                        android.view.flags.Flags.redactOtpAppCompatApi() ?
+                            Telephony.Sms.OTP_SUBTYPE_WEB_OTP | Telephony.Sms.OTP_TYPE_CONTAINS_OTP
+                                : Telephony.Sms.OTP_TYPE_CONTAINS_OTP,
+                        verifiedDomainSql.toString());
+                }
+                return "";
+            }
+            return "";
+        } catch (Exception e) {
+            // In case of exceptions, fail gracefully.
+            return "";
+        }
     }
 
     /**
@@ -2143,6 +2206,13 @@ public class SmsProvider extends ContentProvider {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
                 Log.d(TAG, "update " + url + " succeeded");
             }
+
+            // If this message was upgraded, evaluate its new status and dispatch
+            // any associated PendingIntents to notify the sender.
+            // TODO(b/487924740) Optimize to avoid controller overhead during bulk writes
+            final Context context = getContext();
+            MessageUpgradeController.dispatchSmsPendingIntentsIfUpgraded(
+                    context, context.getUserId(), url, values);
             notifyChange(notifyIfNotDefault, url, callerPkg);
         }
         return count;

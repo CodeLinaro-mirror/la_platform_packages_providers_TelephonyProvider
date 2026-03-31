@@ -220,9 +220,10 @@ public class MmsSmsProvider extends ContentProvider {
     private static String getTextSearchQuery(String smsTable, String pduTable,
             boolean canReadRestrictedMessages) {
 
-        String smsQueryReadRestrictionClause = Flags.secureAccessToRestrictedRcsMessages()
-        ? ("AND " + getTextSearchQueryReadRestrictionWhereClaused(smsTable,
-                        canReadRestrictedMessages)) : "";
+        // Append read restriction clause to the query if the caller can't read restricted messages.
+        String smsQueryReadRestrictionClause =
+                Flags.secureAccessToRestrictedRcsMessages() && !canReadRestrictedMessages
+                        ? (" AND " + getRestrictedTextSearchQueryWhereClause(smsTable)) : "";
         // Search on the words table but return the rows from the corresponding sms table
         final String smsQuery = "SELECT "
                 + smsTable + "._id AS _id,"
@@ -239,9 +240,10 @@ public class MmsSmsProvider extends ContentProvider {
                 + smsQueryReadRestrictionClause
                 + "AND words.table_to_use=1)";
 
-        String mmsQueryReadRestrictionClause = Flags.secureAccessToRestrictedRcsMessages()
-        ? ("AND " + getTextSearchQueryReadRestrictionWhereClaused(pduTable,
-                        canReadRestrictedMessages)) : "";
+        // Append read restriction clause to the query if the caller can't read restricted messages.
+        String mmsQueryReadRestrictionClause =
+                Flags.secureAccessToRestrictedRcsMessages() && !canReadRestrictedMessages
+                        ? (" AND " + getRestrictedTextSearchQueryWhereClause(pduTable)) : "";
         // Search on the words table but return the rows from the corresponding parts table
         final String mmsQuery = "SELECT "
                 + pduTable + "._id,"
@@ -272,11 +274,15 @@ public class MmsSmsProvider extends ContentProvider {
                 + "ORDER BY thread_id ASC, date DESC";
     }
 
-    private static String getTextSearchQueryReadRestrictionWhereClaused(String table,
-            boolean canReadRestrictedMessages) {
-        return " (" + table + "." + ThreadsColumns.READ_RESTRICTION + " & "
-        + ReadRestrictionValues.READ_RESTRICTION_RESTRICTED + " = 0 OR "
-            + canReadRestrictedMessages + ")";
+    /**
+     *  Returns the WHERE clause with {@link ReadRestriction.RESTRICTED} column set to 0 to filter
+     *  out restricted messages.
+     *
+     * @param table The name of the table to read the {@link ReadRestriction.RESTRICTED}
+     *        column from.
+     */
+    private static String getRestrictedTextSearchQueryWhereClause(String table) {
+        return " (" + table + "." + ReadRestriction.RESTRICTED + " = 0) ";
     }
 
     private static final String AUTHORITY = "mms-sms";
@@ -456,7 +462,7 @@ public class MmsSmsProvider extends ContentProvider {
                         }
                     }
                     cursor = getSimpleConversations(
-                            projection, selection, selectionArgs, sortOrder);
+                            projection, selection, selectionArgs, canReadRestrictedMessages);
                 } else {
                     if (selectionBySubIds == null) {
                         // No subscriptions associated with user, return empty cursor.
@@ -1103,7 +1109,17 @@ public class MmsSmsProvider extends ContentProvider {
      * Return existing threads in the database.
      */
     private Cursor getSimpleConversations(String[] projection, String selection,
-            String[] selectionArgs, String sortOrder) {
+            String[] selectionArgs, boolean canReadRestrictedMessages) {
+        if(Flags.secureAccessToRestrictedRcsMessages()) {
+            final SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
+            qb.setTables(TABLE_THREADS);
+            if (!canReadRestrictedMessages) {
+                ReadRestriction.appendReadRestrictionToQuery(qb, TABLE_THREADS,
+                        canReadRestrictedMessages);
+            }
+            return qb.query(mOpenHelper.getReadableDatabase(), projection, selection, selectionArgs,
+                    null, null, " date DESC");
+        }
         return mOpenHelper.getReadableDatabase().query(TABLE_THREADS, projection,
                 selection, selectionArgs, null, null, " date DESC");
     }
