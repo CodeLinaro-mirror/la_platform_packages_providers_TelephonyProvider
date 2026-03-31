@@ -62,6 +62,7 @@ import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.flags.Flags;
+import com.android.internal.telephony.metrics.ReadRestrictionStatsLogger;
 import com.android.internal.telephony.util.TelephonyUtils;
 
 import com.google.android.mms.MmsException;
@@ -343,6 +344,13 @@ public class MmsProvider extends ContentProvider {
         int match = sURLMatcher.match(uri);
         if (LOCAL_LOGV) {
             Log.v(TAG, "Query uri=" + uri + ", match=" + match);
+        }
+
+        if (Flags.secureAccessToRestrictedRcsMessages()
+                && isAccessingPotentiallyRestrictedMessages(match)) {
+            ReadRestrictionStatsLogger.getInstance().onRestrictedMessagesQueried(
+                    ReadRestrictionStatsLogger.ContentProvider.MMS, callerUid,
+                    canReadRestrictedMessages);
         }
 
         switch (match) {
@@ -1005,6 +1013,12 @@ public class MmsProvider extends ContentProvider {
                 return null;
             }
 
+            if (Flags.secureAccessToRestrictedRcsMessages() && table == TABLE_PDU) {
+                ReadRestrictionStatsLogger.getInstance().onMessageInserted(
+                    ReadRestrictionStatsLogger.ContentProvider.MMS,
+                    callerUid, ProviderUtil.isMessageReadRestricted(finalValues));
+            }
+
             // Notify change when an MMS is received.
             if (msgBox == Mms.MESSAGE_BOX_INBOX) {
                 caseSpecificUri = ContentUris.withAppendedId(Mms.Inbox.CONTENT_URI, rowId);
@@ -1660,6 +1674,11 @@ public class MmsProvider extends ContentProvider {
             && finalValues.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
             count = ReadRestriction.performReadRestrictionDatabaseUpdate(
                 db, table, finalValues, finalSelection, selectionArgs);
+            if (count > 0 && !ProviderUtil.isMessageReadRestricted(finalValues)) {
+                ReadRestrictionStatsLogger.getInstance()
+                        .onMessageUnrestricted(
+                        ReadRestrictionStatsLogger.ContentProvider.MMS, callerUid);
+            }
         } else {
             count = db.update(table, finalValues, finalSelection, selectionArgs);
         }
@@ -1867,6 +1886,23 @@ public class MmsProvider extends ContentProvider {
         sURLMatcher.addURI("mms", "threads",    MMS_THREADS);
         sURLMatcher.addURI("mms", "resetFilePerm/*",    MMS_PART_RESET_FILE_PERMISSION);
         sURLMatcher.addURI("mms", "get-pdu",    MMS_GET_PDU);
+    }
+
+
+    /**
+     * Returns true if the match is a potentially accessing restricted messages by reading a broad
+     * range of messages, e.g. all messages, inbox, sent, draft, outbox, etc.
+     */
+    private static boolean isAccessingPotentiallyRestrictedMessages(int match) {
+        return match == MMS_ALL
+                || match == MMS_INBOX
+                || match == MMS_SENT
+                || match == MMS_DRAFTS
+                || match == MMS_OUTBOX
+                || match == MMS_THREADS
+                || match == MMS_ALL_ID
+                || match == MMS_DRM_STORAGE
+                || match == MMS_ALL_PART;
     }
 
     @VisibleForTesting
