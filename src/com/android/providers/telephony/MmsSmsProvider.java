@@ -48,21 +48,21 @@ import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 import android.util.Log;
 
-import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.SmsApplication;
 import com.android.internal.telephony.TelephonyStatsLog;
+import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.util.TelephonyUtils;
 
 import com.google.android.mms.pdu.PduHeaders;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
-import java.lang.UnsupportedOperationException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * This class provides the ability to query the MMS and SMS databases
@@ -218,12 +218,15 @@ public class MmsSmsProvider extends ContentProvider {
             Mms.MESSAGE_TYPE + " = " + PduHeaders.MESSAGE_TYPE_NOTIFICATION_IND + "))";
 
     private static String getTextSearchQuery(String smsTable, String pduTable,
-            boolean canReadRestrictedMessages) {
+            boolean canReadRestrictedMessages, String otpFilter) {
 
         // Append read restriction clause to the query if the caller can't read restricted messages.
         String smsQueryReadRestrictionClause =
                 Flags.secureAccessToRestrictedRcsMessages() && !canReadRestrictedMessages
                         ? (" AND " + getRestrictedTextSearchQueryWhereClause(smsTable)) : "";
+
+        String smsOtpClause = !TextUtils.isEmpty(otpFilter) ? " AND " + otpFilter + " " : "";
+
         // Search on the words table but return the rows from the corresponding sms table
         final String smsQuery = "SELECT "
                 + smsTable + "._id AS _id,"
@@ -238,6 +241,7 @@ public class MmsSmsProvider extends ContentProvider {
                 + "WHERE (index_text MATCH ? "
                 + "AND " + smsTable + "._id=words.source_id "
                 + smsQueryReadRestrictionClause
+                + smsOtpClause
                 + "AND words.table_to_use=1)";
 
         // Append read restriction clause to the query if the caller can't read restricted messages.
@@ -283,6 +287,36 @@ public class MmsSmsProvider extends ContentProvider {
      */
     private static String getRestrictedTextSearchQueryWhereClause(String table) {
         return " (" + table + "." + ReadRestriction.RESTRICTED + " = 0) ";
+    }
+
+    private String getOtpRedactedThreadsTable(String otpFilter) {
+        long startOfCurrentMinuteInMs = (System.currentTimeMillis() / TimeUnit.MINUTES.toMillis(1))
+                * TimeUnit.MINUTES.toMillis(1);
+        long otpCutoff = startOfCurrentMinuteInMs - ProviderUtil.OTP_HIDING_TIME_MS;
+        String needsFilteringColumn = "(date > " + otpCutoff + " AND EXISTS (SELECT 1 FROM sms"
+                + " WHERE thread_id = threads._id AND body = threads.snippet"
+                + " AND NOT " + otpFilter + ")) AS needs_filtering";
+
+        String[] columns = {
+                Threads._ID,
+                Threads.DATE,
+                Threads.MESSAGE_COUNT,
+                Threads.RECIPIENT_IDS,
+                "CASE WHEN needs_filtering THEN '' ELSE " + Threads.SNIPPET + " END AS "
+                        + Threads.SNIPPET,
+                "CASE WHEN needs_filtering THEN 0 ELSE " + Threads.SNIPPET_CHARSET + " END AS "
+                        + Threads.SNIPPET_CHARSET,
+                Threads.READ,
+                Threads.ARCHIVED,
+                Threads.TYPE,
+                Threads.ERROR,
+                Threads.HAS_ATTACHMENT,
+                Threads.SUBSCRIPTION_ID,
+                Threads.READ_RESTRICTION
+        };
+
+        return "(SELECT " + String.join(", ", columns) + " FROM (SELECT *, " + needsFilteringColumn
+                + " FROM " + TABLE_THREADS + ")) AS " + TABLE_THREADS;
     }
 
     private static final String AUTHORITY = "mms-sms";
@@ -398,6 +432,8 @@ public class MmsSmsProvider extends ContentProvider {
         final boolean canReadRestrictedMessages = ProviderUtil.canReadRestrictedMessages(
                 getContext(), callingPackage, callerUid);
 
+        String otpFilter = getOtpFilter(callerUid, callingPackage, callerUserHandle);
+
         Log.v(LOG_TAG, "#query: canReadRestrictedMessages=" + canReadRestrictedMessages);
 
         // If access is restricted, we don't allow subqueries in the query.
@@ -444,7 +480,7 @@ public class MmsSmsProvider extends ContentProvider {
                 selection = DatabaseUtils.concatenateWhere(selection, selectionBySubIds);
 
                 cursor = getCompleteConversations(projection, selection, sortOrder, smsTable,
-                        pduTable, canReadRestrictedMessages);
+                        pduTable, canReadRestrictedMessages, otpFilter);
                 break;
             case URI_CONVERSATIONS:
                 String simple = uri.getQueryParameter("simple");
@@ -462,7 +498,8 @@ public class MmsSmsProvider extends ContentProvider {
                         }
                     }
                     cursor = getSimpleConversations(
-                            projection, selection, selectionArgs, canReadRestrictedMessages);
+                            projection, selection, selectionArgs,
+                            canReadRestrictedMessages, otpFilter);
                 } else {
                     if (selectionBySubIds == null) {
                         // No subscriptions associated with user, return empty cursor.
@@ -472,7 +509,7 @@ public class MmsSmsProvider extends ContentProvider {
 
                     cursor = getConversations(
                             projection, selection, sortOrder, smsTable, pduTable,
-                            canReadRestrictedMessages);
+                            canReadRestrictedMessages, otpFilter);
                 }
                 break;
             case URI_CONVERSATIONS_MESSAGES:
@@ -483,19 +520,20 @@ public class MmsSmsProvider extends ContentProvider {
                 selection = DatabaseUtils.concatenateWhere(selection, selectionBySubIds);
 
                 cursor = getConversationMessages(uri.getPathSegments().get(1), projection,
-                        selection, sortOrder, smsTable, pduTable, canReadRestrictedMessages);
+                        selection, sortOrder, smsTable, pduTable, canReadRestrictedMessages,
+                        otpFilter);
                 break;
             case URI_MESSAGES_COUNT:
                 return getAllMessagesCount();
             case URI_CONVERSATIONS_RECIPIENTS:
                 cursor = getConversationById(
                         uri.getPathSegments().get(1), projection, selection,
-                        selectionArgs, sortOrder, canReadRestrictedMessages);
+                        selectionArgs, sortOrder, canReadRestrictedMessages, otpFilter);
                 break;
             case URI_CONVERSATIONS_SUBJECT:
                 cursor = getConversationById(
                         uri.getPathSegments().get(1), projection, selection,
-                        selectionArgs, sortOrder, canReadRestrictedMessages);
+                        selectionArgs, sortOrder, canReadRestrictedMessages, otpFilter);
                 break;
             case URI_MESSAGES_BY_PHONE:
                 if (selectionBySubIds == null) {
@@ -506,7 +544,7 @@ public class MmsSmsProvider extends ContentProvider {
 
                 cursor = getMessagesByPhoneNumber(
                         uri.getPathSegments().get(2), projection, selection, sortOrder, smsTable,
-                        pduTable, canReadRestrictedMessages);
+                        pduTable, canReadRestrictedMessages, otpFilter);
                 break;
             case URI_THREAD_ID:
                 List<String> recipients = uri.getQueryParameters("recipient");
@@ -562,6 +600,12 @@ public class MmsSmsProvider extends ContentProvider {
                         throw new UnsupportedOperationException(
                                 "URI_SEARCH_SUGGEST is not supported for non-default SMS app");
                     }
+                }
+                // Although the Flags.secureAccessToRestrictedRcsMessages() check above should
+                // restrict untrusted apps, this OTP filter check is performed unconditionally as
+                // a safety measure to ensure security even if the flag is disabled.
+                if (!TextUtils.isEmpty(otpFilter)) {
+                    return emptyCursor;
                 }
                 SEARCH_STRING[0] = uri.getQueryParameter("pattern") + '*' ;
 
@@ -623,7 +667,7 @@ public class MmsSmsProvider extends ContentProvider {
 
                 try {
                     cursor = db.rawQuery(getTextSearchQuery(smsTable, pduTable,
-                        canReadRestrictedMessages),
+                        canReadRestrictedMessages, otpFilter),
                             new String[] { searchString, searchString });
                 } catch (Exception ex) {
                     Log.e(LOG_TAG, "got exception: " + ex.toString());
@@ -1109,10 +1153,13 @@ public class MmsSmsProvider extends ContentProvider {
      * Return existing threads in the database.
      */
     private Cursor getSimpleConversations(String[] projection, String selection,
-            String[] selectionArgs, boolean canReadRestrictedMessages) {
-        if(Flags.secureAccessToRestrictedRcsMessages()) {
+            String[] selectionArgs, boolean canReadRestrictedMessages, String otpFilter) {
+        final String table = TextUtils.isEmpty(otpFilter)
+                ? TABLE_THREADS
+                : getOtpRedactedThreadsTable(otpFilter);
+        if (Flags.secureAccessToRestrictedRcsMessages()) {
             final SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
-            qb.setTables(TABLE_THREADS);
+            qb.setTables(table);
             if (!canReadRestrictedMessages) {
                 ReadRestriction.appendReadRestrictionToQuery(qb, TABLE_THREADS,
                         canReadRestrictedMessages);
@@ -1120,7 +1167,7 @@ public class MmsSmsProvider extends ContentProvider {
             return qb.query(mOpenHelper.getReadableDatabase(), projection, selection, selectionArgs,
                     null, null, " date DESC");
         }
-        return mOpenHelper.getReadableDatabase().query(TABLE_THREADS, projection,
+        return mOpenHelper.getReadableDatabase().query(table, projection,
                 selection, selectionArgs, null, null, " date DESC");
     }
 
@@ -1206,7 +1253,8 @@ public class MmsSmsProvider extends ContentProvider {
      * messages.
      */
     private Cursor getConversations(String[] projection, String selection,
-            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages) {
+            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages,
+            String otpFilter) {
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
 
@@ -1228,10 +1276,15 @@ public class MmsSmsProvider extends ContentProvider {
                 MMS_COLUMNS, 1, "mms",
                 concatSelections(selection, MMS_CONVERSATION_CONSTRAINT),
                 "thread_id", "date = MAX(date)");
+        String smsSelection = concatSelections(selection, SMS_CONVERSATION_CONSTRAINT);
+        if (!TextUtils.isEmpty(otpFilter)) {
+            smsSelection = concatSelections(smsSelection, otpFilter);
+        }
+
         String smsSubQuery = smsQueryBuilder.buildUnionSubQuery(
                 MmsSms.TYPE_DISCRIMINATOR_COLUMN, innerSmsProjection,
                 SMS_COLUMNS, 1, "sms",
-                concatSelections(selection, SMS_CONVERSATION_CONSTRAINT),
+                smsSelection,
                 "thread_id", "date = MAX(date)");
         SQLiteQueryBuilder unionQueryBuilder = new SQLiteQueryBuilder();
 
@@ -1313,9 +1366,9 @@ public class MmsSmsProvider extends ContentProvider {
      */
     private Cursor getCompleteConversations(String[] projection,
             String selection, String sortOrder, String smsTable, String pduTable,
-            boolean canReadRestrictedMessages) {
+            boolean canReadRestrictedMessages, String otpFilter) {
         String unionQuery = buildConversationQuery(projection, selection, sortOrder, smsTable,
-                pduTable, canReadRestrictedMessages);
+                pduTable, canReadRestrictedMessages, otpFilter);
 
         return mOpenHelper.getReadableDatabase().rawQuery(unionQuery, EMPTY_STRING_ARRAY);
     }
@@ -1344,7 +1397,8 @@ public class MmsSmsProvider extends ContentProvider {
      */
     private Cursor getConversationMessages(
             String threadIdString, String[] projection, String selection,
-            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages) {
+            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages,
+            String otpFilter) {
         try {
             Long.parseLong(threadIdString);
         } catch (NumberFormatException exception) {
@@ -1355,7 +1409,8 @@ public class MmsSmsProvider extends ContentProvider {
         String finalSelection = concatSelections(
                 selection, "thread_id = " + threadIdString);
         String unionQuery = buildConversationQuery(projection, finalSelection, sortOrder, smsTable,
-                pduTable, canReadRestrictedMessages);
+                pduTable, canReadRestrictedMessages, otpFilter);
+
 
         return mOpenHelper.getReadableDatabase().rawQuery(unionQuery, EMPTY_STRING_ARRAY);
     }
@@ -1392,7 +1447,8 @@ public class MmsSmsProvider extends ContentProvider {
      */
     private Cursor getMessagesByPhoneNumber(
             String phoneNumber, String[] projection, String selection,
-            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages) {
+            String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages,
+            String otpFilter) {
         int minMatch =
             getContext().getResources().getInteger(
                     com.android.internal.R.integer.config_phonenumber_compare_min_match);
@@ -1405,6 +1461,12 @@ public class MmsSmsProvider extends ContentProvider {
                         selection,
                         "(address=? OR PHONE_NUMBERS_EQUAL(address, ?" +
                         (mUseStrictPhoneNumberComparation ? ", 1))" : ", 0, " + minMatch + "))"));
+
+        String smsSelectionWithOtp = finalSmsSelection;
+        if (!TextUtils.isEmpty(otpFilter)) {
+            smsSelectionWithOtp = concatSelections(finalSmsSelection, otpFilter);
+        }
+
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
 
@@ -1430,7 +1492,7 @@ public class MmsSmsProvider extends ContentProvider {
                 0, "mms", finalMmsSelection, null, null);
         String smsSubQuery = smsQueryBuilder.buildUnionSubQuery(
                 MmsSms.TYPE_DISCRIMINATOR_COLUMN, columns, SMS_COLUMNS,
-                0, "sms", finalSmsSelection, null, null);
+                0, "sms", smsSelectionWithOtp, null, null);
         SQLiteQueryBuilder unionQueryBuilder = new SQLiteQueryBuilder();
 
         unionQueryBuilder.setDistinct(true);
@@ -1447,7 +1509,8 @@ public class MmsSmsProvider extends ContentProvider {
      */
     private Cursor getConversationById(
             String threadIdString, String[] projection, String selection,
-            String[] selectionArgs, String sortOrder, boolean canReadRestrictedMessages) {
+            String[] selectionArgs, String sortOrder, boolean canReadRestrictedMessages,
+            String otpFilter) {
         try {
             Long.parseLong(threadIdString);
         } catch (NumberFormatException exception) {
@@ -1461,7 +1524,10 @@ public class MmsSmsProvider extends ContentProvider {
         String[] columns = handleNullThreadsProjection(projection);
 
         queryBuilder.setDistinct(true);
-        queryBuilder.setTables(TABLE_THREADS);
+        final String table = TextUtils.isEmpty(otpFilter)
+                ? TABLE_THREADS
+                : getOtpRedactedThreadsTable(otpFilter);
+        queryBuilder.setTables(table);
         ReadRestriction.appendReadRestrictionToQuery(queryBuilder, TABLE_THREADS,
                 canReadRestrictedMessages);
         return queryBuilder.query(
@@ -1560,7 +1626,7 @@ public class MmsSmsProvider extends ContentProvider {
 
     private static String buildConversationQuery(String[] projection,
             String selection, String sortOrder, String smsTable, String pduTable,
-            boolean canReadRestrictedMessages) {
+            boolean canReadRestrictedMessages, String otpFilter) {
         String[] mmsProjection = createMmsProjection(projection, pduTable);
 
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
@@ -1592,9 +1658,14 @@ public class MmsSmsProvider extends ContentProvider {
                 columnsPresentInTable, 0, "mms",
                 concatSelections(mmsSelection, MMS_CONVERSATION_CONSTRAINT),
                 null, null);
+        String smsSelection = concatSelections(selection, SMS_CONVERSATION_CONSTRAINT);
+        if (!TextUtils.isEmpty(otpFilter)) {
+            smsSelection = concatSelections(smsSelection, otpFilter);
+        }
+
         String smsSubQuery = smsQueryBuilder.buildUnionSubQuery(
                 MmsSms.TYPE_DISCRIMINATOR_COLUMN, innerSmsProjection, SMS_COLUMNS,
-                0, "sms", concatSelections(selection, SMS_CONVERSATION_CONSTRAINT),
+                0, "sms", smsSelection,
                 null, null);
         SQLiteQueryBuilder unionQueryBuilder = new SQLiteQueryBuilder();
 
@@ -1633,7 +1704,8 @@ public class MmsSmsProvider extends ContentProvider {
         // The delete operation is already restricted to WRITE_SMS permission, so we don't need
         // further restriction for deleting restricted messages.
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(selectionArgs, selection, null, LOG_TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, selection,
+                    /* sortOrder= */ null, LOG_TAG);
         }
 
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
@@ -1867,6 +1939,18 @@ public class MmsSmsProvider extends ContentProvider {
                     MmsSms.CONTENT_URI, null, true, UserHandle.USER_ALL);
         }
         return affectedRows;
+    }
+
+    // This method is to support unit test override
+    protected String getOtpFilter(int callerUid, String callingPackage,
+            UserHandle callerUserHandle) {
+        boolean canReadOtpSms = ProviderUtil.canReadOtpSms(getContext(), callerUid, callingPackage);
+        if (!canReadOtpSms && Telephony.Sms.isOtpRedactionEnabled(getContext())) {
+            return ProviderUtil.getOtpWhereFilter(getContext(), callingPackage,
+                    callerUserHandle);
+        } else {
+            return "";
+        }
     }
 
     private int updateConversation(String threadIdString, ContentValues values, String selection,
