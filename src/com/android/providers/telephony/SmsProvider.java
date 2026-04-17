@@ -19,9 +19,7 @@ package com.android.providers.telephony;
 import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.RequiresPermission;
-import android.annotation.SuppressLint;
 import android.app.AppOpsManager;
-import android.app.compat.CompatChanges;
 import android.content.BroadcastReceiver;
 import android.content.ContentProvider;
 import android.content.ContentResolver;
@@ -48,9 +46,8 @@ import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
 import android.provider.Telephony;
-import android.provider.Telephony.ReadRestriction;
-import android.provider.Telephony.ReadRestriction.ReadRestrictionValues;
 import android.provider.Telephony.MmsSms;
+import android.provider.Telephony.ReadRestriction;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Threads;
 import android.telephony.MessageUpgradeController;
@@ -64,7 +61,6 @@ import android.view.textclassifier.TextClassifier;
 import android.view.textclassifier.TextLinks;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.telephony.PackageBasedTokenUtil;
 import com.android.internal.telephony.SmsApplication;
 import com.android.internal.telephony.TelephonyPermissions;
 import com.android.internal.telephony.flags.Flags;
@@ -148,14 +144,6 @@ public class SmsProvider extends ContentProvider {
 
     /** Delete any raw messages or message segments marked deleted that are older than an hour. */
     private static final long RAW_MESSAGE_EXPIRE_AGE_MS = TimeUnit.HOURS.toMillis(1);
-
-    /** A possible OTP message should only remain in its "pending otp classification" state for
-     * up to 5 seconds
-     */
-    private static final long OTP_CLASSIFICATION_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(5);
-
-    /** OTP messages should be redacted for 3 hours */
-    private static final long OTP_HIDING_TIME_MS = TimeUnit.HOURS.toMillis(3);
 
     /**
      * These are the columns that are available when reading SMS
@@ -540,32 +528,8 @@ public class SmsProvider extends ContentProvider {
             if (Telephony.Sms.isOtpRedactionEnabled(getContext())
                     && qb.getTables().startsWith(smsTable)
                     && !canReadOtpSms(callingUid, callingPackage)) {
-                // If this app can't read OTP messages, only return messages without OTPs, or
-                // messages more than the threshold old, or messages still pending classification,
-                // past the classification cutoff time.
-                long startOfCurrentMinuteInMs = (System.currentTimeMillis() / 60000) * 60000;
-                long otpCutoff = startOfCurrentMinuteInMs - OTP_HIDING_TIME_MS;
-                long startOfCurrentSecondInMs = (System.currentTimeMillis() / 1000) * 1000;
-                long pendingOtpCutoff = startOfCurrentSecondInMs - OTP_CLASSIFICATION_TIMEOUT_MS;
-                @SuppressLint("DefaultLocale")
-                final StringBuilder where = new StringBuilder(String.format(
-                        " %s OR %s < %d OR (%s AND %s < %d)",
-                        getContainsOtpSqlFilter(Sms.OTP_TYPE_NONE), Sms.DATE, otpCutoff,
-                        getContainsOtpSqlFilter(Sms.OTP_TYPE_PENDING), Sms.DATE, pendingOtpCutoff));
-                final String hash = PackageBasedTokenUtil.generatePackageBasedToken(
-                        getContext().getPackageManager(), callingPackage, callerUserHandle);
-                if (hash != null) {
-                    where.append(String.format(" OR (%s LIKE '%%%s%%')",
-                            Sms.BODY, hash));
-                }
-                // Note: For backwards compatibility, we allow packages with
-                // targetSdk < CINNAMON_BUN to read generic OTP messages.
-                if (android.view.flags.Flags.redactOtpAppCompatApi()
-                        && !CompatChanges.isChangeEnabled(SmsManager.FILTER_GENERIC_OTP,
-                                callingPackage, Binder.getCallingUserHandle())) {
-                  where.append(String.format(" OR %s", getContainsGenericOtpSqlFilter()));
-                }
-                qb.appendWhereStandalone(where.toString());
+                qb.appendWhereStandalone(ProviderUtil.getOtpWhereFilter(getContext(),
+                        callingPackage, callerUserHandle));
             }
 
             Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
@@ -579,23 +543,6 @@ public class SmsProvider extends ContentProvider {
         }
     }
 
-    private String getContainsOtpSqlFilter(int containsOtpType) {
-        if (android.view.flags.Flags.redactOtpAppCompatApi()) {
-            return String.format("((%s & %d) = %d)",
-                   Telephony.Sms.CONTAINS_OTP, Telephony.Sms.OTP_TYPE_MASK, containsOtpType);
-        }
-        return String.format("(%s = %d)", Telephony.Sms.CONTAINS_OTP, containsOtpType);
-    }
-
-    private String getContainsGenericOtpSqlFilter() {
-        // Generic OTP is an OTP that does not follow standards defined by either
-        // SMS Hash Retriever standards or Web OTP standards.
-        return String.format("((%s & %s) = %s)",
-               Telephony.Sms.CONTAINS_OTP,
-               Telephony.Sms.OTP_SUBTYPE_MASK | Telephony.Sms.OTP_TYPE_MASK,
-               Telephony.Sms.OTP_SUBTYPE_NONE | Telephony.Sms.OTP_TYPE_CONTAINS_OTP);
-    }
-
     /**
      * Returns the first table name in the query. This is used to disambiguate the sub_id column
      * name when two tables are joined.
@@ -605,9 +552,6 @@ public class SmsProvider extends ContentProvider {
     }
 
     protected boolean canReadRawTable(int uid, String packageName) {
-        if (!Flags.limitRawTableVisibility()) {
-            return true;
-        }
         return TelephonyPermissions.isSystemOrPhone(uid)
                 || SmsApplication.isDefaultSmsApplication(getContext(), packageName);
     }
@@ -1083,7 +1027,10 @@ public class SmsProvider extends ContentProvider {
                 // Determine if incoming messages contain an OTP code
                 String message = values.getAsString(Sms.BODY);
                 int otpType;
-                if (Telephony.Sms.shouldCheckForOtp(getContext(), message)) {
+                Long date = values.getAsLong(Sms.DATE);
+                if (date != null
+                        && date > System.currentTimeMillis() - ProviderUtil.OTP_HIDING_TIME_MS
+                        && Telephony.Sms.shouldCheckForOtp(getContext(), message)) {
                     otpType = Telephony.Sms.OTP_TYPE_PENDING;
                     possibleOtpMessage = message;
                 } else {
@@ -1285,7 +1232,7 @@ public class SmsProvider extends ContentProvider {
                         ContentValues unredacted = new ContentValues();
                         unredacted.put(Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE);
                         updateWithRetry(uri, unredacted, "scheduleOtpCheck: unredact", 1);
-                    }, OTP_HIDING_TIME_MS);
+                    }, ProviderUtil.OTP_HIDING_TIME_MS);
                 }
             } finally {
                 Trace.endSection();
@@ -1311,9 +1258,9 @@ public class SmsProvider extends ContentProvider {
         }
     }
 
-    @SuppressLint("MissingPermission")
+    // This method is to allow override in subclass used for testing on an in-memory database
     protected boolean canReadOtpSms(int uid, String packageName) {
-        return SmsManager.isAppTrustedForSmsOtp(getContext(), packageName, uid);
+        return ProviderUtil.canReadOtpSms(getContext(), uid, packageName);
     }
 
     /**
@@ -1376,7 +1323,8 @@ public class SmsProvider extends ContentProvider {
         // The delete operation is already restricted to WRITE_SMS permission, so we don't need
         // further restriction for deleting restricted messages.
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, where,
+                    /* sortOrder= */ null, TAG);
         }
 
         String filter = "";
@@ -1625,7 +1573,8 @@ public class SmsProvider extends ContentProvider {
                     callerPkg + ";SmsProvider.update;" + url, false);
         }
         if (Flags.secureAccessToRestrictedRcsMessages()) {
-            SqlQueryChecker.checkQueryForForbiddenColumns(whereArgs, where, null, TAG);
+            SqlQueryChecker.checkQueryForForbiddenColumns(/* projection= */ null, where,
+                    /* sortOrder= */ null, TAG);
         }
         if (callerUid != Process.myUid() && values.containsKey(Telephony.Sms.CONTAINS_OTP)) {
             // Apps are not allowed to update the CONTAINS_OTP column directly
@@ -1737,12 +1686,26 @@ public class SmsProvider extends ContentProvider {
         where = DatabaseUtils.concatenateWhere(where, filter);
 
         where = DatabaseUtils.concatenateWhere(where, extraWhere);
-        count = db.update(table, values, where, whereArgs);
+
+        if (Flags.secureAccessToRestrictedRcsMessages()
+            && values.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
+            count = ReadRestriction.performReadRestrictionDatabaseUpdate(
+                db, table, values, where, whereArgs);
+        } else {
+            count = db.update(table, values, where, whereArgs);
+        }
 
         if (count > 0) {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
                 Log.d(TAG, "update " + url + " succeeded");
             }
+
+            // If this message was upgraded, evaluate its new status and dispatch
+            // any associated PendingIntents to notify the sender.
+            // TODO(b/487924740) Optimize to avoid controller overhead during bulk writes
+            final Context context = getContext();
+            MessageUpgradeController.dispatchSmsPendingIntentsIfUpgraded(
+                    context, context.getUserId(), url, values);
             notifyChange(notifyIfNotDefault, url, callerPkg);
         }
         return count;

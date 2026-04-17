@@ -44,7 +44,6 @@ import android.provider.Telephony.Mms.Part;
 import android.provider.Telephony.Mms.Rate;
 import android.provider.Telephony.MmsSms;
 import android.provider.Telephony.MmsSms.PendingMessages;
-import android.provider.Telephony.ReadRestriction;
 import android.provider.Telephony.ReadRestriction.ReadRestrictionValues;
 import android.provider.Telephony.Sms;
 import android.provider.Telephony.Sms.Intents;
@@ -56,9 +55,9 @@ import android.text.format.DateFormat;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.PhoneFactory;
 import com.android.internal.telephony.TelephonyStatsLog;
+import com.android.internal.telephony.flags.Flags;
 
 import com.google.android.mms.pdu.EncodedStringValue;
 import com.google.android.mms.pdu.PduHeaders;
@@ -1342,6 +1341,9 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
          * because messages are considered to be part of the same
          * thread if they have the same subject (or a null subject)
          * and the same set of recipients.
+         *
+         * NOTE: Whenever the columns here are changed, the columns in
+         * {@link MmsSmsProvider#getOtpRedactedThreadsTable} must be changed to match.
          */
         db.execSQL("CREATE TABLE threads (" +
                    Threads._ID + " INTEGER PRIMARY KEY AUTOINCREMENT," +
@@ -2391,19 +2393,13 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
         try {
             db.execSQL("ALTER TABLE " + SmsProvider.TABLE_SMS
                     + " ADD COLUMN " + Sms.READ_RESTRICTION + " INTEGER DEFAULT 0");
-            db.execSQL("UPDATE " + SmsProvider.TABLE_SMS + " SET " + Sms.READ_RESTRICTION + " = 0");
             db.execSQL("ALTER TABLE " + MmsProvider.TABLE_PDU +
                     " ADD COLUMN " + Mms.READ_RESTRICTION + " INTEGER DEFAULT 0");
-            db.execSQL("UPDATE " + MmsProvider.TABLE_PDU + " SET " + Mms.READ_RESTRICTION + " = 0");
             db.execSQL("ALTER TABLE " + MmsSmsProvider.TABLE_THREADS +
                     " ADD COLUMN " + ThreadsColumns.READ_RESTRICTION + " INTEGER DEFAULT 0");
-            db.execSQL("UPDATE " + MmsSmsProvider.TABLE_THREADS + " SET "
-                    + ThreadsColumns.READ_RESTRICTION + " = 0");
             db.execSQL("ALTER TABLE " + MmsSmsProvider.TABLE_CANONICAL_ADDRESSES +
                     " ADD COLUMN " + CanonicalAddressesColumns.READ_RESTRICTION +
                     " INTEGER DEFAULT 0");
-            db.execSQL("UPDATE " + MmsSmsProvider.TABLE_CANONICAL_ADDRESSES + " SET "
-                    + CanonicalAddressesColumns.READ_RESTRICTION + " = 0");
         } catch (SQLiteException e) {
             Log.e(TAG, "[upgradeDatabaseToVersion71] Exception adding column read_restriction; "
                     + e);
