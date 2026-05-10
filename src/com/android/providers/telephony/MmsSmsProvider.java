@@ -25,11 +25,13 @@ import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteDatabaseLockedException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.BaseColumns;
 import android.provider.Telephony;
@@ -398,6 +400,42 @@ public class MmsSmsProvider extends ContentProvider {
 
     @Override
     public Cursor query(Uri uri, String[] projection,
+            String selection, String[] selectionArgs, String sortOrder) {
+        long startTime = SystemClock.elapsedRealtime();
+        Cursor cursor = null;
+
+        int targetUri = ProviderMetricsLogger.TARGET_URI_CONVERSATIONS;
+        int match = URI_MATCHER.match(uri);
+        if (match == URI_THREAD_ID) {
+            targetUri = ProviderMetricsLogger.TARGET_URI_THREAD_ID_RESOLUTION;
+        }
+
+        try {
+            cursor = queryInternal(uri, projection, selection, selectionArgs, sortOrder);
+
+            if (cursor != null) {
+                cursor.getCount(); // Force evaluation
+                ProviderMetricsLogger.logOperationLatency(
+                        getContext(),
+                        ProviderMetricsLogger.OPERATION_QUERY,
+                        targetUri,
+                        startTime,
+                        cursor.getCount());
+            }
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_QUERY, targetUri);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return cursor;
+    }
+
+    /** Internal implementation of the database operation. */
+    public Cursor queryInternal(Uri uri, String[] projection,
             String selection, String[] selectionArgs, String sortOrder) {
         final int callerUid = Binder.getCallingUid();
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
@@ -943,7 +981,37 @@ public class MmsSmsProvider extends ContentProvider {
      * one and return it.  Callers should always use
      * Threads.getThreadId to access this information.
      */
+
     private synchronized Cursor getThreadId(List<String> recipients,
+            boolean canReadRestrictedMessages) {
+        long startTime = SystemClock.elapsedRealtime();
+        Cursor cursor = null;
+        try {
+            cursor = getThreadIdInternal(recipients, canReadRestrictedMessages);
+            int count = 0;
+            if (cursor != null) {
+                count = cursor.getCount(); // Force evaluation
+            }
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_QUERY,
+                    ProviderMetricsLogger.TARGET_URI_THREAD_ID_RESOLUTION,
+                    startTime,
+                    count);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_QUERY,
+                    ProviderMetricsLogger.TARGET_URI_THREAD_ID_RESOLUTION);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return cursor;
+    }
+
+    private synchronized Cursor getThreadIdInternal(List<String> recipients,
             boolean canReadRestrictedMessages) {
         // Read restriction does not need to be enforced when assembling addresses for a thread.
         // This method already verifies if the caller has the permission to create a new thread and
@@ -1452,7 +1520,8 @@ public class MmsSmsProvider extends ContentProvider {
     private Cursor getUndeliveredMessages(
             String[] projection, String selection, String[] selectionArgs,
             String sortOrder, String smsTable, String pduTable, boolean canReadRestrictedMessages) {
-        String[] mmsProjection = createMmsProjection(projection, pduTable);
+        String[] columns = handleNullMessageProjection(projection);
+        String[] mmsColumns = createMmsProjection(columns, pduTable);
 
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
@@ -1472,12 +1541,10 @@ public class MmsSmsProvider extends ContentProvider {
                 + " OR " + Sms.TYPE + " = " + Sms.MESSAGE_TYPE_FAILED
                 + " OR " + Sms.TYPE + " = " + Sms.MESSAGE_TYPE_QUEUED + ")");
 
-        String[] smsColumns = handleNullMessageProjection(projection);
-        String[] mmsColumns = handleNullMessageProjection(mmsProjection);
         String[] innerMmsProjection = makeProjectionWithDateAndThreadId(
                 mmsColumns, 1000);
         String[] innerSmsProjection = makeProjectionWithDateAndThreadId(
-                smsColumns, 1);
+                columns, 1);
 
         Set<String> columnsPresentInTable = new HashSet<String>(MMS_COLUMNS);
         columnsPresentInTable.add(pduTable + "._id");
@@ -1502,7 +1569,7 @@ public class MmsSmsProvider extends ContentProvider {
         outerQueryBuilder.setTables("(" + unionQuery + ")");
 
         String outerQuery = outerQueryBuilder.buildQuery(
-                smsColumns, null, null, null, sortOrder, null);
+                columns, null, null, null, sortOrder, null);
 
         return mOpenHelper.getReadableDatabase().rawQuery(outerQuery, EMPTY_STRING_ARRAY);
     }
@@ -1524,7 +1591,8 @@ public class MmsSmsProvider extends ContentProvider {
     private static String buildConversationQuery(String[] projection,
             String selection, String sortOrder, String smsTable, String pduTable,
             boolean canReadRestrictedMessages, String otpFilter) {
-        String[] mmsProjection = createMmsProjection(projection, pduTable);
+        String[] columns = handleNullMessageProjection(projection);
+        String[] mmsColumns = createMmsProjection(columns, pduTable);
 
         SQLiteQueryBuilder mmsQueryBuilder = new SQLiteQueryBuilder();
         SQLiteQueryBuilder smsQueryBuilder = new SQLiteQueryBuilder();
@@ -1539,10 +1607,8 @@ public class MmsSmsProvider extends ContentProvider {
         ReadRestriction.appendRestrictedToQuery(smsQueryBuilder, smsTable,
                 canReadRestrictedMessages);
 
-        String[] smsColumns = handleNullMessageProjection(projection);
-        String[] mmsColumns = handleNullMessageProjection(mmsProjection);
         String[] innerMmsProjection = makeProjectionWithNormalizedDate(mmsColumns, 1000);
-        String[] innerSmsProjection = makeProjectionWithNormalizedDate(smsColumns, 1);
+        String[] innerSmsProjection = makeProjectionWithNormalizedDate(columns, 1);
 
         Set<String> columnsPresentInTable = new HashSet<String>(MMS_COLUMNS);
         columnsPresentInTable.add(pduTable + "._id");
@@ -1577,7 +1643,7 @@ public class MmsSmsProvider extends ContentProvider {
         outerQueryBuilder.setTables("(" + unionQuery + ")");
 
         return outerQueryBuilder.buildQuery(
-                smsColumns, null, null, null, sortOrder, null);
+                columns, null, null, null, sortOrder, null);
     }
 
     @Override
@@ -1587,6 +1653,31 @@ public class MmsSmsProvider extends ContentProvider {
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
+        long startTime = SystemClock.elapsedRealtime();
+        int result = 0;
+        try {
+            result = deleteInternal(uri, selection, selectionArgs);
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_DELETE,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS,
+                    startTime,
+                    result);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_DELETE,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public int deleteInternal(Uri uri, String selection, String[] selectionArgs) {
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         String selectionBySubIds;
         final long token = Binder.clearCallingIdentity();
@@ -1681,6 +1772,31 @@ public class MmsSmsProvider extends ContentProvider {
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
+        long startTime = SystemClock.elapsedRealtime();
+        Uri result = null;
+        try {
+            result = insertInternal(uri, values);
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_INSERT,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS,
+                    startTime,
+                    1);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_INSERT,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public Uri insertInternal(Uri uri, ContentValues values) {
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         final int callerUid = Binder.getCallingUid();
         SQLiteDatabase db = mOpenHelper.getWritableDatabase();
@@ -1735,6 +1851,32 @@ public class MmsSmsProvider extends ContentProvider {
 
     @Override
     public int update(Uri uri, ContentValues values,
+            String selection, String[] selectionArgs) {
+        long startTime = SystemClock.elapsedRealtime();
+        int result = 0;
+        try {
+            result = updateInternal(uri, values, selection, selectionArgs);
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_UPDATE,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS,
+                    startTime,
+                    result);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_UPDATE,
+                    ProviderMetricsLogger.TARGET_URI_CONVERSATIONS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public int updateInternal(Uri uri, ContentValues values,
             String selection, String[] selectionArgs) {
         final int callerUid = Binder.getCallingUid();
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();

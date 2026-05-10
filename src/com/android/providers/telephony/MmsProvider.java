@@ -30,12 +30,14 @@ import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteDatabaseLockedException;
 import android.database.sqlite.SQLiteException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.BaseColumns;
@@ -59,6 +61,7 @@ import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.flags.Flags;
+import com.android.internal.telephony.metrics.ReadRestrictionStatsLogger;
 import com.android.internal.telephony.util.TelephonyUtils;
 
 import com.google.android.mms.pdu.PduHeaders;
@@ -205,6 +208,36 @@ public class MmsProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection,
             String selection, String[] selectionArgs, String sortOrder) {
+        long startTime = SystemClock.elapsedRealtime();
+        Cursor cursor = null;
+        try {
+            cursor = queryInternal(
+                    uri, projection, selection, selectionArgs, sortOrder);
+            int count = 0;
+            if (cursor != null) {
+                count = cursor.getCount(); // Force evaluation
+            }
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_QUERY,
+                    ProviderMetricsLogger.TARGET_URI_MMS,
+                    startTime,
+                    count);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_QUERY, ProviderMetricsLogger.TARGET_URI_MMS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return cursor;
+    }
+
+    /** Internal implementation of the database operation. */
+    public Cursor queryInternal(Uri uri, String[] projection,
+            String selection, String[] selectionArgs, String sortOrder) {
         final int callerUid = Binder.getCallingUid();
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         String callingPackage = getCallingPackage();
@@ -243,6 +276,13 @@ public class MmsProvider extends ContentProvider {
         int match = sURLMatcher.match(uri);
         if (LOCAL_LOGV) {
             Log.v(TAG, "Query uri=" + uri + ", match=" + match);
+        }
+
+        if (Flags.secureAccessToRestrictedRcsMessages()
+                && isAccessingPotentiallyRestrictedMessages(match)) {
+            ReadRestrictionStatsLogger.getInstance().onRestrictedMessagesQueried(
+                    ReadRestrictionStatsLogger.ContentProvider.MMS, callerUid,
+                    canReadRestrictedMessages);
         }
 
         switch (match) {
@@ -600,6 +640,31 @@ public class MmsProvider extends ContentProvider {
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
+        long startTime = SystemClock.elapsedRealtime();
+        Uri result = null;
+        try {
+            result = insertInternal(uri, values);
+            int count = (result != null) ? 1 : 0;
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_INSERT,
+                    ProviderMetricsLogger.TARGET_URI_MMS,
+                    startTime,
+                    count);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_INSERT, ProviderMetricsLogger.TARGET_URI_MMS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public Uri insertInternal(Uri uri, ContentValues values) {
         final int callerUid = Binder.getCallingUid();
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         final String callerPkg = getCallingPackage();
@@ -749,6 +814,12 @@ public class MmsProvider extends ContentProvider {
                     ((MmsSmsDatabaseHelper) mOpenHelper).printDatabaseOpeningDebugLog();
                 }
                 return null;
+            }
+
+            if (Flags.secureAccessToRestrictedRcsMessages() && table == TABLE_PDU) {
+                ReadRestrictionStatsLogger.getInstance().onMessageInserted(
+                    ReadRestrictionStatsLogger.ContentProvider.MMS,
+                    callerUid, ProviderUtil.isMessageReadRestricted(finalValues));
             }
 
             // Notify change when an MMS is received.
@@ -973,6 +1044,32 @@ public class MmsProvider extends ContentProvider {
     @Override
     public int delete(Uri uri, String selection,
             String[] selectionArgs) {
+        long startTime = SystemClock.elapsedRealtime();
+        int result = 0;
+        try {
+            result = deleteInternal(uri, selection, selectionArgs);
+            int count = result;
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_DELETE,
+                    ProviderMetricsLogger.TARGET_URI_MMS,
+                    startTime,
+                    count);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_DELETE, ProviderMetricsLogger.TARGET_URI_MMS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public int deleteInternal(Uri uri, String selection,
+            String[] selectionArgs) {
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         int match = sURLMatcher.match(uri);
         if (LOCAL_LOGV) {
@@ -1186,6 +1283,32 @@ public class MmsProvider extends ContentProvider {
 
     @Override
     public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        long startTime = SystemClock.elapsedRealtime();
+        int result = 0;
+        try {
+            result = updateInternal(uri, values, selection, selectionArgs);
+            int count = result;
+            ProviderMetricsLogger.logOperationLatency(
+                    getContext(),
+                    ProviderMetricsLogger.OPERATION_UPDATE,
+                    ProviderMetricsLogger.TARGET_URI_MMS,
+                    startTime,
+                    count);
+        } catch (SQLiteDatabaseLockedException e) { // Lock
+            ProviderMetricsLogger.logDbLockContention(getContext(),
+                    ProviderMetricsLogger.OPERATION_UPDATE, ProviderMetricsLogger.TARGET_URI_MMS);
+            throw e;
+        } catch (Exception e) {
+            Log.e("ProviderMetrics", "Database operation failed", e);
+            ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+            throw e;
+        }
+        return result;
+    }
+
+    /** Internal implementation of the database operation. */
+    public int updateInternal(Uri uri, ContentValues values,
+            String selection, String[] selectionArgs) {
         // The _data column is filled internally in MmsProvider, so this check is just to avoid
         // it from being inadvertently set. This is not supposed to be a protection against
         // malicious attack, since sql injection could still be attempted to bypass the check. On
@@ -1324,6 +1447,11 @@ public class MmsProvider extends ContentProvider {
             && finalValues.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
             count = ReadRestriction.performReadRestrictionDatabaseUpdate(
                 db, table, finalValues, finalSelection, selectionArgs);
+            if (count > 0 && !ProviderUtil.isMessageReadRestricted(finalValues)) {
+                ReadRestrictionStatsLogger.getInstance()
+                        .onMessageUnrestricted(
+                        ReadRestrictionStatsLogger.ContentProvider.MMS, callerUid);
+            }
         } else {
             count = db.update(table, finalValues, finalSelection, selectionArgs);
         }
@@ -1341,6 +1469,19 @@ public class MmsProvider extends ContentProvider {
 
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        long startTime = SystemClock.elapsedRealtime();
+        ParcelFileDescriptor fd = openFileInternal(uri, mode);
+        ProviderMetricsLogger.logOperationLatency(
+                getContext(),
+                ProviderMetricsLogger.OPERATION_OPEN_FILE,
+                ProviderMetricsLogger.TARGET_URI_PART,
+                startTime,
+                fd != null ? 1 : 0);
+        return fd;
+    }
+
+    private ParcelFileDescriptor openFileInternal(
+            Uri uri, String mode) throws FileNotFoundException {
         int match = sURLMatcher.match(uri);
 
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
@@ -1516,6 +1657,23 @@ public class MmsProvider extends ContentProvider {
         sURLMatcher.addURI("mms", "drm/#",      MMS_DRM_STORAGE_ID);
         sURLMatcher.addURI("mms", "threads",    MMS_THREADS);
         sURLMatcher.addURI("mms", "resetFilePerm/*",    MMS_PART_RESET_FILE_PERMISSION);
+    }
+
+
+    /**
+     * Returns true if the match is a potentially accessing restricted messages by reading a broad
+     * range of messages, e.g. all messages, inbox, sent, draft, outbox, etc.
+     */
+    private static boolean isAccessingPotentiallyRestrictedMessages(int match) {
+        return match == MMS_ALL
+                || match == MMS_INBOX
+                || match == MMS_SENT
+                || match == MMS_DRAFTS
+                || match == MMS_OUTBOX
+                || match == MMS_THREADS
+                || match == MMS_ALL_ID
+                || match == MMS_DRM_STORAGE
+                || match == MMS_ALL_PART;
     }
 
     @VisibleForTesting

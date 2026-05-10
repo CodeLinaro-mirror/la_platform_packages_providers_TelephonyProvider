@@ -33,6 +33,7 @@ import android.os.Process;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Telephony;
+import android.provider.Telephony.ReadRestriction;
 import android.telephony.SmsManager;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
@@ -69,7 +70,7 @@ public class ProviderUtil {
     /** OTP messages should be redacted for 3 hours */
     public static final long OTP_HIDING_TIME_MS = TimeUnit.HOURS.toMillis(3);
 
-    private static final int MAX_ALLOWED_VERIFIED_DOMAINS = 5;
+    private static final int MAX_ALLOWED_VERIFIED_DOMAINS = 25;
 
     /**
      * Check if a caller of the provider has restricted access,
@@ -125,13 +126,24 @@ public class ProviderUtil {
      * @return true if the caller is system or phone, or has the app op, false otherwise
      */
     public static boolean canWriteRestrictedMessages(Context context, String packageName, int uid) {
-        if(!Flags.secureAccessToRestrictedRcsMessages() ||
-                TelephonyPermissions.isSystemOrPhone(uid)) {
-            return true;
+        // Assumes that the caller has the permission to write restricted messages, as long as they
+        // have WRITE_SMS permission.
+        return true;
+    }
+
+    /**
+     * Check if a message is restricted by inspecting the read restriction column.
+     *
+     * @param values The content of the message
+     * @return true if the message is restricted, false otherwise
+     */
+    public static boolean isMessageReadRestricted(ContentValues values) {
+        if (!values.containsKey(ReadRestriction.READ_RESTRICTION_COLUMN_NAME)) {
+            return false;
         }
-        int op = ((AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE)).noteOpNoThrow(
-                AppOpsManager.OP_WRITE_RESTRICTED_MESSAGES, uid, packageName, null, null);
-        return op == AppOpsManager.MODE_ALLOWED;
+        int readRestriction = values.getAsInteger(ReadRestriction.READ_RESTRICTION_COLUMN_NAME);
+        return (readRestriction & ReadRestriction.ReadRestrictionValues.READ_RESTRICTION_RESTRICTED)
+                > 0;
     }
 
     /**
@@ -343,25 +355,27 @@ public class ProviderUtil {
     /**
      * Log all running processes of the telephony provider package.
      */
-    public static void logRunningTelephonyProviderProcesses(@NonNull Context context) {
+    public static int logRunningTelephonyProviderProcesses(@NonNull Context context) {
         ActivityManager am = context.getSystemService(ActivityManager.class);
         if (am == null) {
             Log.d(TAG, "logRunningTelephonyProviderProcesses: ActivityManager service is not"
                     + " available");
-            return;
+            return 0;
         }
 
         List<ActivityManager.RunningAppProcessInfo> processInfos = am.getRunningAppProcesses();
         if (processInfos == null) {
             Log.d(TAG, "logRunningTelephonyProviderProcesses: processInfos is null");
-            return;
+            return 0;
         }
 
         StringBuilder sb = new StringBuilder();
+        int count = 0;
         for (ActivityManager.RunningAppProcessInfo processInfo : processInfos) {
             if (Arrays.asList(processInfo.pkgList).contains(TELEPHONY_PROVIDER_PACKAGE)
                     || UserHandle.isSameApp(processInfo.uid, Process.PHONE_UID)) {
                 sb.append("{ProcessName=");
+                count++;
                 sb.append(processInfo.processName);
                 sb.append(";PID=");
                 sb.append(processInfo.pid);
@@ -375,6 +389,7 @@ public class ProviderUtil {
             }
         }
         Log.d(TAG, "RunningTelephonyProviderProcesses:" + sb.toString());
+        return count;
     }
 
     /**
