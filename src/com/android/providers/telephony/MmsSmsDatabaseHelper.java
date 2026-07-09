@@ -217,7 +217,7 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
     private static final String NO_SUCH_TABLE_EXCEPTION_MESSAGE = "no such table";
 
     static final String DATABASE_NAME = "mmssms.db";
-    static final int DATABASE_VERSION = 68;
+    static final int DATABASE_VERSION = 69;
     private static final int IDLE_CONNECTION_TIMEOUT_MS = 30000;
 
     private final Context mContext;
@@ -1127,7 +1127,8 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
             "sub_id INTEGER DEFAULT " + SubscriptionManager.INVALID_SUBSCRIPTION_ID + ", " +
             "error_code INTEGER DEFAULT " + NO_ERROR_CODE + ", " +
             "creator TEXT," +
-            "seen INTEGER DEFAULT 0" +
+            "seen INTEGER DEFAULT 0," +
+            "priority INTEGER DEFAULT -1" +
             ");";
 
     @VisibleForTesting
@@ -1828,6 +1829,22 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
             } finally {
                 db.endTransaction();
             }
+            // fall through
+        case 68:
+            Log.d(TAG, "onUpgrade: upgrading from version 68 to 69, oldVersion=" + oldVersion);
+            if (currentVersion <= 68) {
+                return;
+            }
+            db.beginTransaction();
+            try {
+                upgradeDatabaseToVersion69(db, oldVersion, currentVersion);
+                db.setTransactionSuccessful();
+            } catch (Throwable ex) {
+                Log.e(TAG, ex.getMessage(), ex);
+                break; // force to destroy all old data;
+            } finally {
+                db.endTransaction();
+            }
             return;
         }
 
@@ -2146,11 +2163,12 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
     }
     private void checkAndUpdateSmsTable(SQLiteDatabase db) {
         try {
-            db.query(SmsProvider.TABLE_SMS, new String[] {"priority"}, null, null, null, null,
+            db.query(SmsProvider.TABLE_SMS, new String[]{"priority"}, null, null, null, null,
                     null);
         } catch (SQLiteException e) {
             Log.e(TAG, "checkAndUpgradeSmsTable: ex. ", e);
-            if (e.getMessage().startsWith(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
+            if (e.getMessage() != null
+                    && e.getMessage().contains(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
                 db.execSQL("ALTER TABLE " + SmsProvider.TABLE_SMS + " ADD COLUMN "
                         + "priority INTEGER DEFAULT -1");
             }
@@ -2163,7 +2181,8 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
                     null, null, null, null, null);
         } catch (SQLiteException e) {
             Log.e(TAG, "checkAndUpdateThreadsTable: ex. ", e);
-            if (e.getMessage().startsWith(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
+            if (e.getMessage() != null
+                    && e.getMessage().contains(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
                 db.execSQL("ALTER TABLE " + MmsSmsProvider.TABLE_THREADS + " ADD COLUMN "
                         + Threads.ATTACHMENT_INFO + " TEXT");
             }
@@ -2174,7 +2193,8 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
                     null, null, null, null, null);
         } catch (SQLiteException e) {
             Log.e(TAG, "checkAndUpdateThreadsTable: ex. ", e);
-            if (e.getMessage().startsWith(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
+            if (e.getMessage() != null
+                    && e.getMessage().contains(NO_SUCH_COLUMN_EXCEPTION_MESSAGE)) {
                 db.execSQL("ALTER TABLE " + MmsSmsProvider.TABLE_THREADS + " ADD COLUMN "
                         + Threads.NOTIFICATION + " INTEGER DEFAULT 0");
             }
@@ -2214,6 +2234,18 @@ public class MmsSmsDatabaseHelper extends SQLiteOpenHelper {
             Log.e(TAG, "[upgradeDatabaseToVersion68] Exception adding column "
                     + "sub_id; " + e);
             logException(e, oldVersion, currentVersion, 68);
+        }
+    }
+
+    private void upgradeDatabaseToVersion69(SQLiteDatabase db, int oldVersion, int currentVersion) {
+        Log.d(TAG, "[upgradeDatabaseToVersion69] Adding priority column to sms table");
+        try {
+            db.execSQL("ALTER TABLE " + SmsProvider.TABLE_SMS
+                    + " ADD COLUMN priority INTEGER DEFAULT -1");
+            Log.d(TAG, "[upgradeDatabaseToVersion69] Successfully added priority column");
+        } catch (SQLiteException e) {
+            Log.e(TAG, "[upgradeDatabaseToVersion69] Exception adding column priority: " + e);
+            logException(e, oldVersion, currentVersion, 69);
         }
     }
 

@@ -21,6 +21,7 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.UriMatcher;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
@@ -779,9 +780,22 @@ public class MmsSmsProvider extends ContentProvider {
                     selection, selectionArgs, null, null, null);
 
             if (cursor.getCount() == 0) {
-                // TODO (b/256992531): Currently, one sim card is set as default sms subId in work
-                //  profile. Default sms subId should be updated based on user pref.
-                int subId = SmsManager.getDefaultSmsSubscriptionId();
+                // On Android Automotive the foreground user (user 10) owns all messaging
+                // content, but getDefaultSmsSubscriptionId() can return a stale REMOTE_SIM
+                // sub_id from a previous Bluetooth MAP session. That sub_id carries
+                // UserHandle.USER_NULL and is invisible to
+                // getSubscriptionInfoListAssociatedWithUser(), so ProviderUtil builds a filter
+                // that excludes it and the canonical_address becomes unreadable by the MMS app.
+                // sub_id=-1 is the standard value for user-independent content and is always
+                // included in getSelectionBySubIds() via the hardcoded fallback, guaranteeing
+                // the address is visible regardless of which user context queries it.
+                //
+                // Gated to Automotive only: on other form factors getDefaultSmsSubscriptionId()
+                // correctly reflects the active SIM and should keep being recorded as before.
+                int subId = getContext().getPackageManager().hasSystemFeature(
+                        PackageManager.FEATURE_AUTOMOTIVE)
+                        ? SubscriptionManager.INVALID_SUBSCRIPTION_ID
+                        : SmsManager.getDefaultSmsSubscriptionId();
                 ContentValues contentValues = new ContentValues(1);
                 contentValues.put(CanonicalAddressesColumns.ADDRESS, refinedAddress);
                 contentValues.put(CanonicalAddressesColumns.SUBSCRIPTION_ID, subId);

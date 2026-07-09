@@ -50,6 +50,7 @@ import android.provider.Telephony.Threads;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
+import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
@@ -64,9 +65,12 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.TelephonyPermissions;
 import com.android.internal.telephony.util.TelephonyUtils;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import com.android.internal.telephony.EncodeException;
 import com.android.internal.telephony.GsmAlphabet;
@@ -690,6 +694,84 @@ public class SmsProvider extends ContentProvider {
         }
     }
 
+    /**
+     * Returns true if the delete WHERE clause targets a REMOTE_SIM subscription.
+     * Used to bypass the user-association filter for BT MAP cleanup on managed-profile
+     * devices, where REMOTE_SIM subscriptions have userId=USER_NULL and are not
+     * associated with any user.
+     *
+     * <p>Only the Bluetooth system package is trusted with this bypass — otherwise any caller
+     * could delete another user's SMS rows for a stale/orphaned sub_id by guessing an integer
+     * that still has rows in the table.
+     */
+    private boolean isRemoteSimDeleteRequest(String where, String[] whereArgs, String callerPkg) {
+        if (where == null || whereArgs == null || whereArgs.length == 0) return false;
+        if (!"com.android.bluetooth".equals(callerPkg)) return false;
+        // Require the exact form used by clearMessages() to avoid parsing positional args
+        // incorrectly when the WHERE clause has multiple bindings (e.g. "date < ? AND sub_id = ?").
+        if (!where.trim().equals(Sms.SUBSCRIPTION_ID + " = ?")) return false;
+        try {
+            int subId = Integer.parseInt(whereArgs[0]);
+            if (!SubscriptionManager.isValidSubscriptionId(subId)) return false;
+            SubscriptionManager sm = (SubscriptionManager) getContext().getSystemService(
+                    Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            if (sm == null) return false;
+            List<SubscriptionInfo> allSubs;
+            final long token = Binder.clearCallingIdentity();
+            try {
+                allSubs = sm.getAllSubscriptionInfoList();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+            if (allSubs != null) {
+                for (SubscriptionInfo info : allSubs) {
+                    if (info.getSubscriptionId() == subId) {
+                        boolean isRemote = info.getSubscriptionType()
+                                == SubscriptionManager.SUBSCRIPTION_TYPE_REMOTE_SIM;
+                        if (Log.isLoggable(TAG, Log.DEBUG)) {
+                            Log.d(TAG, "isRemoteSimDeleteRequest: subId=" + subId
+                                    + " foundInSubManager=true type=" + info.getSubscriptionType()
+                                    + " isRemoteSim=" + isRemote);
+                        }
+                        return isRemote;
+                    }
+                }
+            }
+            // The sub_id is no longer in the subscription manager (already removed by
+            // cleanUp() after a previous session). Check whether any SMS rows with
+            // this sub_id exist in the table — if so it is an orphaned BT MAP sub_id
+            // and the delete must be allowed to clean up the stale messages. This is safe
+            // to run with the caller's own identity since it's a plain read of the SMS
+            // table, no elevated permission is required.
+            SQLiteDatabase db = getWritableDatabase(sURLMatcher.match(Sms.CONTENT_URI));
+            if (db != null) {
+                Cursor c = db.query(TABLE_SMS, new String[]{"1"}, "sub_id = ?",
+                        new String[]{String.valueOf(subId)}, null, null, null, "1");
+                if (c != null) {
+                    try {
+                        if (c.moveToFirst()) {
+                            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                                Log.d(TAG, "isRemoteSimDeleteRequest: subId=" + subId
+                                        + " foundInSubManager=false orphanRows>0"
+                                        + " — allowing cleanup of stale BT MAP SMS");
+                            }
+                            return true; // orphaned REMOTE_SIM rows — allow cleanup
+                        }
+                    } finally {
+                        c.close();
+                    }
+                }
+            }
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "isRemoteSimDeleteRequest: subId=" + subId
+                        + " foundInSubManager=false orphanRows=0 — not a BT MAP delete");
+            }
+        } catch (NumberFormatException e) {
+            // whereArgs[0] is not an integer, not a subId-based delete
+        }
+        return false;
+    }
+
     private Uri insertInner(Uri url, ContentValues initialValues, int callerUid, String callerPkg,
             UserHandle callerUserHandle) {
         ContentValues values;
@@ -920,8 +1002,65 @@ public class SmsProvider extends ContentProvider {
                 address = values.getAsString(Sms.ADDRESS);
             }
 
-            if (!TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(), subId,
-                    callerUserHandle, address)) {
+            // Only enforce user-subscription association for local SIM subscriptions.
+            // REMOTE_SIM subscriptions (BT MAP) have userId=USER_NULL (no user association).
+            // On managed-profile devices (user 10), checkSubscriptionAssociatedWithUser
+            // returns false for REMOTE_SIM because managed profiles get no fallback to
+            // the subscriptionsWithNoAssociation list. Skip the check for REMOTE_SIM.
+            //
+            // Use clearCallingIdentity() to ensure system identity is used for subscription
+            // lookups — without it, getAllSubscriptionInfoList() filters out newly registered
+            // subscriptions during first boot due to READ_PHONE_STATE carrier-privilege checks.
+            SubscriptionManager subscriptionManager =
+                    (SubscriptionManager) getContext().getSystemService(
+                            Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            SubscriptionInfo subInfo = null;
+            final long identityToken = Binder.clearCallingIdentity();
+            try {
+                if (subscriptionManager != null) {
+                    subInfo = subscriptionManager.getActiveSubscriptionInfo(subId);
+                    if (subInfo == null) {
+                        // getActiveSubscriptionInfo can return null in a race window right
+                        // after a REMOTE_SIM subscription is registered (first BT MAP
+                        // connection after boot). Fall back to getAllSubscriptionInfoList
+                        // which reads from DB directly.
+                        List<SubscriptionInfo> allSubs =
+                                subscriptionManager.getAllSubscriptionInfoList();
+                        if (allSubs != null) {
+                            for (SubscriptionInfo info : allSubs) {
+                                if (info.getSubscriptionId() == subId) {
+                                    subInfo = info;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } finally {
+                Binder.restoreCallingIdentity(identityToken);
+            }
+            boolean isRemoteSim = subInfo != null
+                    && subInfo.getSubscriptionType()
+                            == SubscriptionManager.SUBSCRIPTION_TYPE_REMOTE_SIM;
+            // If the subscription lookup failed (subscription cache being recomputed on first
+            // BT MAP connect after boot) but the caller is the Bluetooth system package and
+            // subId is a valid subscription id, treat as REMOTE_SIM. BT MAP exclusively uses
+            // REMOTE_SIM subscriptions and is a trusted system component. This avoids blocking
+            // the first-connect sync while the subscription manager cache stabilizes.
+            if (!isRemoteSim && subInfo == null
+                    && SubscriptionManager.isValidSubscriptionId(subId)
+                    && "com.android.bluetooth".equals(callerPkg)) {
+                isRemoteSim = true;
+                Log.w(TAG, "insert: subId=" + subId
+                        + " subInfo null but caller=com.android.bluetooth, allowing");
+            }
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "insert: subId=" + subId + " isRemoteSim=" + isRemoteSim
+                        + " subInfo=" + (subInfo != null ? "found" : "null"));
+            }
+            if (!isRemoteSim
+                    && !TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(),
+                            subId, callerUserHandle, address)) {
                 TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(), subId,
                         callerUid, callerPkg);
                 return null;
@@ -1357,6 +1496,7 @@ public class SmsProvider extends ContentProvider {
     public int delete(Uri url, String where, String[] whereArgs) {
         final UserHandle callerUserHandle = Binder.getCallingUserHandle();
         final int callerUid = Binder.getCallingUid();
+        final String callerPkg = getCallingPackage();
         final long token = Binder.clearCallingIdentity();
 
         String selectionBySubIds = null;
@@ -1382,8 +1522,45 @@ public class SmsProvider extends ContentProvider {
                     selectionByEmergencyNumbers : selectionBySubIds;
         }
 
+        if (Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "delete: callerUid=" + callerUid
+                    + " callerUser=" + callerUserHandle
+                    + " selectionBySubIds=" + selectionBySubIds
+                    + " filterBeforeBypass=" + filter
+                    + " where=" + where);
+        }
+
         int count;
         int match = sURLMatcher.match(url);
+
+        // REMOTE_SIM subscriptions (BT MAP) carry UserHandle.USER_NULL so they never appear
+        // in getSubscriptionInfoListAssociatedWithUser(). ProviderUtil therefore builds
+        // selectionBySubIds = "sub_id IN ('-1')" — the sub_id (-1 fallback only).
+        // A delete for sub_id=41 becomes "(sub_id IN ('-1')) AND (sub_id = 41)" → 0 rows.
+        //
+        // The old guard "filter == null" was unreachable because ProviderUtil always adds the
+        // -1 fallback, making filter non-null even when no real subscription is in the list.
+        // Drop that guard so the bypass fires whenever the WHERE clause is the exact pattern
+        // used by MapClientContent.clearMessages(). isRemoteSimDeleteRequest() already
+        // restricts the bypass to the Bluetooth system package and validates the sub_id
+        // (confirming REMOTE_SIM type when still registered; falling back to a same-caller-
+        // identity SMS-table probe for already-removed orphan sub_ids).
+        //
+        // Scoped to SMS_ALL only — that's the only match this bypass is designed for
+        // (MapClientContent.clearMessages() always deletes via the bare Sms.CONTENT_URI).
+        // Without this match check, satisfying the WHERE-shape check from SMS_CONVERSATIONS_ID
+        // would also clear the subId-association filter for that branch.
+        if (match == SMS_ALL && isRemoteSimDeleteRequest(where, whereArgs, callerPkg)) {
+            // bypass the sub_id IN (...) filter for BT MAP cleanup deletes.
+            // filter="" means no additional restriction — the caller's WHERE clause
+            // (sub_id = ?) is used as-is.  filter=null would cause SMS_ALL to return 0.
+            filter = "";
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "delete: REMOTE_SIM bypass applied — filter cleared for sub_id="
+                        + (whereArgs != null && whereArgs.length > 0 ? whereArgs[0] : "?"));
+            }
+        }
+
         SQLiteDatabase db = getWritableDatabase(match);
         boolean notifyIfNotDefault = true;
         switch (match) {

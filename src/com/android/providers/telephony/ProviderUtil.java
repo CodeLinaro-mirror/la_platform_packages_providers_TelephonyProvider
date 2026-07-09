@@ -22,6 +22,7 @@ import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Process;
@@ -154,8 +155,52 @@ public class ProviderUtil {
         SubscriptionManager subManager = context.getSystemService(SubscriptionManager.class);
         if (subManager != null) {
             // Get list of subscriptions associated with this user.
-            associatedSubscriptionsList = subManager
-                    .getSubscriptionInfoListAssociatedWithUser(userHandle);
+            try {
+                associatedSubscriptionsList = subManager
+                        .getSubscriptionInfoListAssociatedWithUser(userHandle);
+            } catch (IllegalArgumentException e) {
+                // A subscription (e.g. a REMOTE_SIM being torn down by BT MAP cleanup) can be
+                // deleted between this call's internal subscription snapshot and its per-subId
+                // lookup, throwing IllegalArgumentException instead of just skipping that entry.
+                // Treat it the same as an empty association list rather than letting the
+                // exception propagate to the querying app.
+                Log.w(TAG, "getSelectionBySubIds: subscription removed during lookup", e);
+            }
+        }
+
+        if (Log.isLoggable(TAG, Log.VERBOSE)) {
+            Log.d(TAG, "getSelectionBySubIds: user=" + userHandle
+                    + " associatedSubs=" + associatedSubscriptionsList.stream()
+                            .map(i -> String.valueOf(i.getSubscriptionId()))
+                            .collect(Collectors.joining(",", "[", "]")));
+        }
+
+        // On Android Automotive the foreground user (user 10) should be able to read all
+        // SMS/MMS content.  getSubscriptionInfoListAssociatedWithUser() returns an empty list
+        // when every subscription carries UserHandle.USER_NULL (e.g. REMOTE_SIM subscriptions
+        // from Bluetooth MAP where no explicit user association is set).  In that case fall back
+        // to getActiveSubscriptionInfoList() so the generated sub_id IN (...) clause covers the
+        // subscriptions that actually have content in the database.  This also fixes pre-existing
+        // canonical_address rows written with a stale REMOTE_SIM sub_id before the
+        // INVALID_SUBSCRIPTION_ID fix in getSingleAddressId() was applied.
+        //
+        // Gated to Automotive only: on phone builds with multiple users, falling back to
+        // "every active subscription" for any user with an empty association list would let
+        // one user's query see another user's SMS content.
+        if (associatedSubscriptionsList.isEmpty() && subManager != null
+                && context.getPackageManager().hasSystemFeature(
+                        PackageManager.FEATURE_AUTOMOTIVE)) {
+            List<SubscriptionInfo> active = subManager.getActiveSubscriptionInfoList();
+            if (active != null) {
+                associatedSubscriptionsList = new ArrayList<>(active);
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    Log.d(TAG, "getSelectionBySubIds: user-association list empty, "
+                            + "fell back to getActiveSubscriptionInfoList: "
+                            + active.stream()
+                                    .map(i -> String.valueOf(i.getSubscriptionId()))
+                                    .collect(Collectors.joining(",", "[", "]")));
+                }
+            }
         }
 
         UserManager userManager = context.getSystemService(UserManager.class);
@@ -179,7 +224,7 @@ public class ProviderUtil {
                 .collect(Collectors.joining(","));
         String selectionBySubId = (Telephony.Sms.SUBSCRIPTION_ID + " IN (" + subIdListStr + ")");
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
-            Log.d(TAG, "getSelectionBySubIds: " + selectionBySubId);
+            Log.d(TAG, "getSelectionBySubIds: result=" + selectionBySubId);
         }
         return selectionBySubId;
     }
