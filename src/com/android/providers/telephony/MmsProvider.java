@@ -451,14 +451,14 @@ public class MmsProvider extends ContentProvider {
             }
         }
 
-        if (table.equals(TABLE_PDU)) {
-            if (!TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(), subId,
+        if (!TelephonyPermissions.checkSubscriptionAssociatedWithUser(getContext(), subId,
                     callerUserHandle)) {
-                TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(), subId,
-                        callerUid, callerPkg);
-                return null;
-            }
+            TelephonyUtils.showSwitchToManagedProfileDialogIfAppropriate(getContext(), subId,
+                    callerUid, callerPkg);
+            return null;
+        }
 
+        if (table.equals(TABLE_PDU)) {
             boolean addDate = !values.containsKey(Mms.DATE);
             boolean addMsgBox = !values.containsKey(Mms.MESSAGE_BOX);
 
